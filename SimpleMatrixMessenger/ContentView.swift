@@ -97,7 +97,7 @@ struct ChatListView: View {
                 } else {
                     ForEach(matrixService.rooms, id: \.roomId) { room in
                         NavigationLink(destination: ChatRoomView(matrixService: matrixService, room: room), tag: room.roomId, selection: $selectedRoomId) {
-                            ChatRow(room: room)
+                            ChatRow(room: room, matrixService: matrixService)
                         }
                     }
                 }
@@ -112,19 +112,61 @@ struct ChatListView: View {
 
 struct ChatRow: View {
     let room: MXRoom
+    @ObservedObject var matrixService: MatrixService
+    @State private var displayName: String = ""
     
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text(room.roomId)
+                Text(displayName)
                     .font(.headline)
-                Text("Tap to open chat")
+                    .onAppear {
+                        updateDisplayName()
+                    }
+                Text(getLastMessagePreview(room))
                     .font(.subheadline)
                     .foregroundColor(.gray)
+                    .lineLimit(1)
             }
             Spacer()
+            
+            if room.summary?.localUnreadEventCount ?? 0 > 0 {
+                Text("\(room.summary?.localUnreadEventCount ?? 0)")
+                    .padding(8)
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .clipShape(Circle())
+                    .font(.caption)
+            }
         }
         .padding(.vertical, 4)
+    }
+    
+    private func updateDisplayName() {
+        // Get initial display name
+        let initialName = matrixService.getDisplayName(for: room)
+        displayName = initialName
+        
+        // Try to load better display name if it's a user ID
+        if initialName.contains("@") && initialName.contains(":") {
+            matrixService.loadUserDisplayName(userId: initialName) { betterName in
+                if let betterName = betterName, !betterName.isEmpty {
+                    displayName = betterName
+                }
+            }
+        }
+    }
+    
+    private func getLastMessagePreview(_ room: MXRoom) -> String {
+        guard let lastMessage = room.summary?.lastMessage else {
+            return "No messages yet"
+        }
+        
+        if let content = lastMessage.text as? String {
+            return content
+        }
+        
+        return "New message"
     }
 }
 
@@ -516,6 +558,20 @@ class MatrixService: ObservableObject {
             }
         }
         return nil
+    }
+    
+    // Add this to track user display names
+    private var userDisplayNames: [String: String] = [:]
+    
+    func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
+        mxSession?.matrixRestClient.displayName(forUser: userId) { response in
+            switch response {
+            case .success(let displayName):
+                completion(displayName)
+            case .failure:
+                completion(nil)
+            }
+        }
     }
 }
 
