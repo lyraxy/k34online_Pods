@@ -234,15 +234,48 @@ struct ChatRoomView: View {
     @State private var messageText = ""
     
     var roomMessages: [Message] {
-        matrixService.messages.filter { $0.roomId == room.roomId }
+        matrixService.messages
+            .filter { $0.roomId == room.roomId }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    var isLoading: Bool {
+        matrixService.isLoadingHistory[room.roomId] ?? false
     }
     
     var body: some View {
         VStack {
+            // Индикатор загрузки
+            if isLoading {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Загрузка сообщений...")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                .padding()
+            }
+            
             ScrollView {
                 LazyVStack {
-                    ForEach(roomMessages) { message in
-                        MessageBubble(message: message)
+                    if !isLoading && roomMessages.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "message")
+                                .font(.system(size: 40))
+                                .foregroundColor(.gray)
+                            Text("Пока нет сообщений")
+                                .font(.headline)
+                                .foregroundColor(.gray)
+                            Text("Начните общение!")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(40)
+                    } else {
+                        ForEach(roomMessages) { message in
+                            MessageBubble(message: message)
+                        }
                     }
                 }
                 .padding()
@@ -260,13 +293,9 @@ struct ChatRoomView: View {
             }
             .padding()
         }
-        .navigationTitle("Чат")
+        .navigationTitle(matrixService.getDisplayName(for: room))
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
-        }
-        .onDisappear {
-            // Clean up when leaving the chat room
-            matrixService.messages.removeAll { $0.roomId == room.roomId }
         }
     }
 }
@@ -347,10 +376,13 @@ class MatrixService: ObservableObject {
     @Published var error: String?
     @Published var isLoggedIn = false
     @Published var currentUserId: String?
+    @Published var isLoadingHistory: [String: Bool] = [:]
     
     private var mxRestClient: MXRestClient?
     private var mxSession: MXSession?
     private var roomListeners: [String: Any] = [:]
+    private var userDisplayNames: [String: String] = [:]
+    private var processedEventIds: Set<String> = [] // Для отслеживания уже обработанных сообщений
     
     func login(username: String, password: String) {
         isLoading = true
@@ -428,87 +460,134 @@ class MatrixService: ObservableObject {
     func joinRoom(roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId) else { return }
         
-        // Remove any existing listener for this room
+        // Устанавливаем флаг загрузки
+        isLoadingHistory[roomId] = true
+        
+        // Удаляем старый слушатель
         if let existingListener = roomListeners[roomId] {
             room.removeListener(existingListener)
         }
         
-        // Add new listener for this room
-        let listener = room.listen { [weak self] event, direction, state in
-            self?.handleRoomEvent(event, direction: direction, roomId: roomId)
+        // Добавляем новый слушатель для ВСЕХ событий (исторических и новых)
+        let listener = room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else { return }
+            
+            timeline.listenToEvents { [weak self] event, direction, roomState in
+                guard let self = self else { return }
+                
+                // Убираем conditional binding, так как event не optional
+                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
+            }
+            
+            // Загружаем историю сообщений
+            self.loadRoomHistory(timeline: timeline, room: room)
         }
         
         roomListeners[roomId] = listener
-        
-        // Load existing messages
-        loadRoomHistory(room: room)
     }
     
-    private func handleRoomEvent(_ event: MXEvent?, direction: MXTimelineDirection, roomId: String) {
-        // Use simple nil check instead of conditional binding
-        if event == nil || direction != .forwards {
-            return
-        }
+    private func loadRoomHistory(timeline: MXEventTimeline, room: MXRoom) {
+        // Сбрасываем пагинацию и загружаем исторические сообщения
+        timeline.resetPagination()
         
-        let actualEvent = event!
-        if actualEvent.eventType == .roomMessage,
-           let content = actualEvent.content["body"] as? String {
+        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
+            guard let self = self else { return }
             
-            let message = Message(
-                id: actualEvent.eventId ?? UUID().uuidString,
-                text: content,
-                sender: actualEvent.sender ?? "Unknown",
-                timestamp: Date(),
-                roomId: roomId,
-                isOutgoing: actualEvent.sender == self.currentUserId
-            )
-            
+            switch response {
+            case .success:
+                // Проверяем, можно ли загрузить еще сообщения
+                if timeline.canPaginate(.backwards) {
+                    // Продолжаем загрузку истории
+                    self.loadRoomHistory(timeline: timeline, room: room)
+                } else {
+                    // Завершили загрузку истории
+                    DispatchQueue.main.async {
+                        self.isLoadingHistory[room.roomId] = false
+                        print("Завершена загрузка истории для комнаты: \(room.roomId)")
+                    }
+                }
+                
+            case .failure(let error):
+                print("Ошибка загрузки истории: \(error)")
+                DispatchQueue.main.async {
+                    self.isLoadingHistory[room.roomId] = false
+                    self.error = "Ошибка загрузки истории сообщений"
+                }
+            }
+        }
+    }
+    
+    private func handleTimelineEvent(_ event: MXEvent, direction: MXTimelineDirection, roomId: String) {
+        // Обрабатываем ВСЕ события (и исторические .backwards и новые .forwards)
+        if let message = createMessage(from: event, roomId: roomId) {
             DispatchQueue.main.async {
-                self.messages.append(message)
+                // Проверяем, не обработали ли мы уже это сообщение
+                if !self.processedEventIds.contains(message.id) {
+                    self.processedEventIds.insert(message.id)
+                    self.messages.append(message)
+                    
+                    // Сортируем сообщения по времени
+                    self.messages.sort { $0.timestamp < $1.timestamp }
+                }
             }
         }
     }
     
-    private func loadRoomHistory(room: MXRoom) {
-        room.liveTimeline { [weak self] timeline in
-            guard let timeline = timeline else { return }
-            
-            timeline.resetPagination()
-            timeline.paginate(100, direction: .backwards, onlyFromStore: false) { _ in
-                self?.processRoomHistory(room: room, timeline: timeline)
-            }
+    private func createMessage(from event: MXEvent, roomId: String) -> Message? {
+        guard event.eventType == .roomMessage else {
+            return nil
         }
-    }
-    
-    private func processRoomHistory(room: MXRoom, timeline: MXEventTimeline) {
-        // Just set up the listener and let real-time events handle the messages
-        // Historical messages will come through the event listener
-        print("Joined room: \(room.roomId)")
         
-        // You can add a placeholder message or loading indicator
-        DispatchQueue.main.async {
-            // Clear any existing messages for this room
-            //self.messages.removeAll { $0.roomId == room.roomId }
+        // Извлекаем текст сообщения
+        var messageText = ""
+        
+        if let text = event.content["body"] as? String {
+            messageText = text
+        } else if event.content["msgtype"] as? String == "m.image" {
+            messageText = "📷 Изображение"
+        } else if event.content["msgtype"] as? String == "m.file" {
+            messageText = "📎 Файл"
+        } else {
+            return nil
         }
+        
+        // Создаем timestamp
+        let timestamp: Date
+        if event.originServerTs != 0 {
+            timestamp = Date(timeIntervalSince1970: TimeInterval(event.originServerTs / 1000))
+        } else {
+            timestamp = Date()
+        }
+        
+        return Message(
+            id: event.eventId ?? UUID().uuidString,
+            text: messageText,
+            sender: event.sender ?? "Unknown",
+            timestamp: timestamp,
+            roomId: roomId,
+            isOutgoing: event.sender == self.currentUserId
+        )
     }
+    
     func sendMessage(_ text: String, in roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId) else {
-            error = "Room not found"
+            error = "Комната не найдена"
             return
         }
         
+        // Исправленная версия - создаем переменную для localEcho
         var localEcho: MXEvent?
         room.sendTextMessage(text, localEcho: &localEcho) { [weak self] response in
             DispatchQueue.main.async {
                 if case .failure(let error) = response {
-                    self?.error = "Send failed: \(error.localizedDescription)"
+                    self?.error = "Ошибка отправки: \(error.localizedDescription)"
                 }
             }
         }
     }
     
     func logout() {
-        // Remove all room listeners
+        // Удаляем все слушатели
         for (roomId, listener) in roomListeners {
             if let room = mxSession?.room(withRoomId: roomId) {
                 room.removeListener(listener)
@@ -524,31 +603,34 @@ class MatrixService: ObservableObject {
         isLoggedIn = false
         currentUserId = nil
         error = nil
+        isLoadingHistory.removeAll()
+        processedEventIds.removeAll()
     }
+    
     func getDisplayName(for room: MXRoom) -> String {
-        // For direct chats, try to get the other user's display name
+        // Для личных чатов пытаемся получить отображаемое имя другого пользователя
         if room.isDirect {
             if let directUserId = room.directUserId {
-                return directUserId // You can enhance this to get actual display name
+                return extractUsername(from: directUserId)
             }
-            return "Direct Chat"
+            return "Личный чат"
         }
         
-        // For group chats, use room summary display name or fallback to room ID
+        // Для групповых чатов используем displayName из summary
         if let summary = room.summary, let displayName = summary.displayName, !displayName.isEmpty {
             return displayName
         }
         
-        // Fallback: extract user ID from room ID for direct-looking rooms
+        // Fallback: извлекаем user ID из room ID
         if let otherUserId = extractUserIdFromRoomId(room.roomId) {
-            return otherUserId
+            return extractUsername(from: otherUserId)
         }
         
-        return room.roomId // Final fallback
+        return room.roomId // Финальный fallback
     }
     
     private func extractUserIdFromRoomId(_ roomId: String) -> String? {
-        // Matrix room IDs often contain user IDs, especially in direct messages
+        // Matrix room IDs часто содержат user IDs, особенно в личных сообщениях
         let pattern = "@[^:]+:[^\\s]+"
         if let regex = try? NSRegularExpression(pattern: pattern) {
             let range = NSRange(roomId.startIndex..<roomId.endIndex, in: roomId)
@@ -561,8 +643,14 @@ class MatrixService: ObservableObject {
         return nil
     }
     
-    // Add this to track user display names
-    private var userDisplayNames: [String: String] = [:]
+    private func extractUsername(from userId: String) -> String {
+        // Извлекаем username из user ID (например: "@ivanov:k34.online" -> "ivanov")
+        if let range = userId.range(of: "@(.*):", options: .regularExpression) {
+            let username = String(userId[range].dropFirst().dropLast())
+            return username.capitalized
+        }
+        return userId
+    }
     
     func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
         mxSession?.matrixRestClient.displayName(forUser: userId) { response in
