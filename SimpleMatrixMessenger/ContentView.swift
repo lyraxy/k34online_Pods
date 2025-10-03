@@ -26,21 +26,21 @@ struct ContentView: View {
             ChatListView(matrixService: matrixService)
                 .tabItem {
                     Image(systemName: "message.fill")
-                    Text("Chats")
+                    Text("Чаты")
                 }
                 .tag(0)
             
             NewChatView(matrixService: matrixService)
                 .tabItem {
                     Image(systemName: "plus.message.fill")
-                    Text("New Chat")
+                    Text("Новый чат")
                 }
                 .tag(1)
             
             ProfileView(matrixService: matrixService)
                 .tabItem {
                     Image(systemName: "person.fill")
-                    Text("Profile")
+                    Text("Профиль")
                 }
                 .tag(2)
         }
@@ -48,20 +48,20 @@ struct ContentView: View {
     
     var loginView: some View {
         VStack(spacing: 20) {
-            Text("Matrix Messenger")
+            Text("k34 online")
                 .font(.title)
                 .padding(.bottom, 30)
             
-            TextField("Username", text: $username)
+            TextField("Имя пользователя", text: $username)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .autocapitalization(.none)
                 .padding(.horizontal)
             
-            SecureField("Password", text: $password)
+            SecureField("Пароль", text: $password)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .padding(.horizontal)
             
-            Button("Login") {
+            Button("Войти") {
                 matrixService.login(username: username, password: password)
             }
             .padding()
@@ -91,7 +91,7 @@ struct ChatListView: View {
         NavigationView {
             List {
                 if matrixService.rooms.isEmpty {
-                    Text("No chats yet. Start a new conversation!")
+                    Text("Пока нет чатов. Начать новый чат!")
                         .foregroundColor(.gray)
                         .italic()
                 } else {
@@ -102,7 +102,7 @@ struct ChatListView: View {
                     }
                 }
             }
-            .navigationTitle("Chats")
+            .navigationTitle("Чаты")
             .refreshable {
                 matrixService.loadRooms()
             }
@@ -159,14 +159,14 @@ struct ChatRow: View {
     
     private func getLastMessagePreview(_ room: MXRoom) -> String {
         guard let lastMessage = room.summary?.lastMessage else {
-            return "No messages yet"
+            return "Пока нет сообщений"
         }
         
         if let content = lastMessage.text as? String {
             return content
         }
         
-        return "New message"
+        return "Новое сообщение"
     }
 }
 
@@ -179,20 +179,19 @@ struct NewChatView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 20) {
-                Text("Start a new conversation")
+                Text("Начать новый чат")
                     .font(.title2)
                     .padding()
                 
-                TextField("Enter user ID (e.g., @user:matrix.org)", text: $userId)
+                TextField("Введите имя пользователя (например, ivanov)", text: $userId)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .autocapitalization(.none)
                     .padding()
-                
                 Button(action: createDirectChat) {
                     if isCreatingRoom {
                         ProgressView()
                     } else {
-                        Text("Start Chat")
+                        Text("Начать чат")
                             .frame(maxWidth: .infinity)
                     }
                 }
@@ -211,13 +210,15 @@ struct NewChatView: View {
                 
                 Spacer()
             }
-            .navigationTitle("New Chat")
+            .navigationTitle("Новый чат")
         }
     }
     
     private func createDirectChat() {
         isCreatingRoom = true
-        matrixService.createDirectChat(with: userId) { success in
+        let trimmedUserId = userId.trimmingCharacters(in: .whitespaces)
+        let normalizedUserId = "@\(trimmedUserId):k34.online"
+        matrixService.createDirectChat(with: normalizedUserId) { success in
             isCreatingRoom = false
             if success {
                 userId = ""
@@ -248,10 +249,10 @@ struct ChatRoomView: View {
             }
             
             HStack {
-                TextField("Type a message...", text: $messageText)
+                TextField("Напишите сообщение...", text: $messageText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                 
-                Button("Send") {
+                Button("Отправить") {
                     matrixService.sendMessage(messageText, in: room.roomId)
                     messageText = ""
                 }
@@ -259,7 +260,7 @@ struct ChatRoomView: View {
             }
             .padding()
         }
-        .navigationTitle("Chat")
+        .navigationTitle("Чат")
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
         }
@@ -311,10 +312,10 @@ struct ProfileView: View {
                     .foregroundColor(.blue)
                     .padding()
                 
-                Text(matrixService.currentUserId ?? "Unknown User")
+                Text(matrixService.currentUserId ?? "Неизвестный пользователь")
                     .font(.title2)
                 
-                Button("Logout") {
+                Button("Выйти") {
                     matrixService.logout()
                 }
                 .padding()
@@ -324,7 +325,7 @@ struct ProfileView: View {
                 
                 Spacer()
             }
-            .navigationTitle("Profile")
+            .navigationTitle("Профиль")
         }
     }
 }
@@ -354,11 +355,11 @@ class MatrixService: ObservableObject {
     func login(username: String, password: String) {
         isLoading = true
         error = nil
-        
+        let newUsername = "@\(username):k34.online"
         let homeserverURL = URL(string: "https://k34.online")!
         mxRestClient = MXRestClient(homeServer: homeserverURL, unrecognizedCertificateHandler: nil)
         
-        mxRestClient?.login(username: username, password: password) { [weak self] response in
+        mxRestClient?.login(username: newUsername, password: password) { [weak self] response in
             guard let self = self else { return }
             
             DispatchQueue.main.async {
@@ -399,7 +400,7 @@ class MatrixService: ObservableObject {
     
     func createDirectChat(with userId: String, completion: @escaping (Bool) -> Void) {
         guard let session = mxSession else {
-            error = "Not connected"
+            error = "Нет подключения"
             completion(false)
             return
         }
@@ -417,7 +418,7 @@ class MatrixService: ObservableObject {
                     self?.error = nil
                     completion(true)
                 case .failure(let error):
-                    self?.error = "Failed to create chat: \(error.localizedDescription)"
+                    self?.error = "Ошибка при создании чата: \(error.localizedDescription)"
                     completion(false)
                 }
             }
@@ -487,7 +488,7 @@ class MatrixService: ObservableObject {
         // You can add a placeholder message or loading indicator
         DispatchQueue.main.async {
             // Clear any existing messages for this room
-            self.messages.removeAll { $0.roomId == room.roomId }
+            //self.messages.removeAll { $0.roomId == room.roomId }
         }
     }
     func sendMessage(_ text: String, in roomId: String) {
