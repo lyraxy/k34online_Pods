@@ -384,8 +384,10 @@ struct MessageBubble: View {
                     
                     // Отображение реакций
                     if !message.reactions.isEmpty {
-                        ReactionsView(reactions: message.reactions)
-                            .padding(.top, 2)
+                        ReactionsView(reactions: message.reactions) { reaction in
+                            handleReactionTap(reaction)
+                        }
+                        .padding(.top, 2)
                     }
                     
                     Text(formatTimestamp(message.timestamp))
@@ -402,7 +404,7 @@ struct MessageBubble: View {
         .padding(.vertical, 2)
         .onTapGesture(count: 2) {
             // Двойное нажатие для быстрой реакции "👍"
-            matrixService.addReaction("👍", to: message.id, in: room.roomId)
+            handleQuickReaction()
         }
         .onLongPressGesture {
             showReactionPickerForMessage = message.id
@@ -414,15 +416,35 @@ struct MessageBubble: View {
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
+    
+    private func handleReactionTap(_ reaction: MessageReaction) {
+        if reaction.didReact {
+            // Убираем реакцию, если пользователь уже поставил её
+            matrixService.removeReaction(reaction.emoji, from: message.id, in: room.roomId)
+        } else {
+            // Добавляем реакцию
+            matrixService.addReaction(reaction.emoji, to: message.id, in: room.roomId)
+        }
+    }
+    
+    private func handleQuickReaction() {
+        // Проверяем, есть ли уже реакция "👍" от текущего пользователя
+        if let existingReaction = message.reactions.first(where: { $0.emoji == "👍" && $0.didReact }) {
+            matrixService.removeReaction("👍", from: message.id, in: room.roomId)
+        } else {
+            matrixService.addReaction("👍", to: message.id, in: room.roomId)
+        }
+    }
 }
 
 // MARK: - Reactions View
 struct ReactionsView: View {
     let reactions: [MessageReaction]
+    var onReactionTap: ((MessageReaction) -> Void)? = nil
     
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(Array(reactions.enumerated()), id: \.offset) { index, reaction in
+            ForEach(reactions) { reaction in
                 HStack(spacing: 4) {
                     Text(reaction.emoji)
                     Text("\(reaction.count)")
@@ -431,8 +453,24 @@ struct ReactionsView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.gray.opacity(0.1))
+                .background(reaction.didReact ? Color.blue.opacity(0.2) : Color.gray.opacity(0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(reaction.didReact ? Color.blue : Color.clear, lineWidth: 1)
+                )
                 .cornerRadius(12)
+                .onTapGesture {
+                    onReactionTap?(reaction)
+                }
+                .contextMenu {
+                    if reaction.didReact {
+                        Button(role: .destructive) {
+                            onReactionTap?(reaction)
+                        } label: {
+                            Label("Убрать реакцию", systemImage: "trash")
+                        }
+                    }
+                }
             }
         }
     }
@@ -447,26 +485,84 @@ struct ReactionPickerView: View {
     
     let commonReactions = ["👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉"]
     
+    // Находим сообщение для которого показываем пикер
+    private var message: Message? {
+        matrixService.messages.first { $0.id == messageId }
+    }
+    
     var body: some View {
         NavigationView {
-            ScrollView {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
-                    ForEach(commonReactions, id: \.self) { emoji in
-                        Button(action: {
-                            matrixService.addReaction(emoji, to: messageId, in: room.roomId)
-                            presentationMode.wrappedValue.dismiss()
-                        }) {
-                            Text(emoji)
-                                .font(.system(size: 30))
-                                .frame(width: 50, height: 50)
-                                .background(Color.gray.opacity(0.1))
-                                .cornerRadius(10)
+            VStack {
+                // Показываем текущие реакции сообщения
+                if let message = message, !message.reactions.isEmpty {
+                    VStack(alignment: .leading) {
+                        Text("Текущие реакции:")
+                            .font(.headline)
+                            .padding(.horizontal)
+                        
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack {
+                                ForEach(message.reactions) { reaction in
+                                    VStack {
+                                        HStack(spacing: 4) {
+                                            Text(reaction.emoji)
+                                                .font(.title2)
+                                            Text("\(reaction.count)")
+                                                .font(.caption)
+                                        }
+                                        .padding(8)
+                                        .background(reaction.didReact ? Color.blue.opacity(0.3) : Color.gray.opacity(0.2))
+                                        .cornerRadius(8)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .stroke(reaction.didReact ? Color.blue : Color.clear, lineWidth: 2)
+                                        )
+                                        .onTapGesture {
+                                            if reaction.didReact {
+                                                matrixService.removeReaction(reaction.emoji, from: messageId, in: room.roomId)
+                                            } else {
+                                                matrixService.addReaction(reaction.emoji, to: messageId, in: room.roomId)
+                                            }
+                                            presentationMode.wrappedValue.dismiss()
+                                        }
+                                        
+                                        if reaction.didReact {
+                                            Text("Убрать")
+                                                .font(.caption2)
+                                                .foregroundColor(.red)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.horizontal)
                         }
                     }
+                    .padding(.vertical)
                 }
-                .padding()
+                
+                Text("Добавить реакцию:")
+                    .font(.headline)
+                    .padding(.horizontal)
+                
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
+                        ForEach(commonReactions, id: \.self) { emoji in
+                            Button(action: {
+                                matrixService.addReaction(emoji, to: messageId, in: room.roomId)
+                                presentationMode.wrappedValue.dismiss()
+                            }) {
+                                Text(emoji)
+                                    .font(.system(size: 30))
+                                    .frame(width: 50, height: 50)
+                                    .background(Color.gray.opacity(0.1))
+                                    .cornerRadius(10)
+                            }
+                        }
+                    }
+                    .padding()
+                }
             }
-            .navigationTitle("Выберите реакцию")
+            .navigationTitle("Реакции")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -511,10 +607,12 @@ struct ProfileView: View {
 }
 
 // MARK: - Models and Services
-struct MessageReaction {
+struct MessageReaction: Identifiable {
+    let id = UUID()
     let emoji: String
     let count: Int
     let users: [String]
+    var didReact: Bool = false // Добавляем флаг, поставил ли текущий пользователь эту реакцию
 }
 
 struct Message: Identifiable {
@@ -697,10 +795,43 @@ class MatrixService: ObservableObject {
         } else if event.eventType == .reaction {
             // Обрабатываем реакции
             handleReactionEvent(event, roomId: roomId)
+        } else if event.eventType == .roomRedaction {
+            // Обрабатываем отзыв событий (включая реакции)
+            handleRedactionEvent(event, roomId: roomId)
+        }
+    }
+    
+    private func handleRedactionEvent(_ event: MXEvent, roomId: String) {
+        guard let redactedEventId = event.redacts else { return }
+        
+        DispatchQueue.main.async {
+            // Ищем отозванное событие в кэше реакций
+            for (messageId, events) in self.reactionEvents {
+                if let index = events.firstIndex(where: { $0.eventId == redactedEventId }) {
+                    // Удаляем отозванную реакцию из кэша
+                    self.reactionEvents[messageId]?.remove(at: index)
+                    
+                    // Обновляем сообщение с новыми реакциями
+                    if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
+                        var updatedMessage = self.messages[messageIndex]
+                        updatedMessage.reactions = self.calculateReactions(for: messageId)
+                        self.messages[messageIndex] = updatedMessage
+                    }
+                    
+                    break
+                }
+            }
+            
+            self.objectWillChange.send()
         }
     }
     
     private func handleReactionEvent(_ event: MXEvent, roomId: String) {
+        // Пропускаем отозванные события реакций
+        if event.isRedactedEvent() {
+            return
+        }
+        
         guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
               let relType = relatesTo["rel_type"] as? String,
               relType == "m.annotation",
@@ -715,19 +846,17 @@ class MatrixService: ObservableObject {
                 self.reactionEvents[eventId] = []
             }
             
-            // В Matrix SDK 0.27.17 используем другой способ проверки отозванных событий
-            let isRedacted = event.isState() // Упрощенная проверка
-            
-            if isRedacted {
-                // Удаляем реакцию если событие было отозвано
-                self.reactionEvents[eventId]?.removeAll { $0.eventId == event.eventId }
+            // Проверяем, есть ли уже такая реакция от этого пользователя
+            if let existingIndex = self.reactionEvents[eventId]?.firstIndex(where: {
+                $0.eventId == event.eventId ||
+                ($0.sender == event.sender &&
+                 ($0.content["m.relates_to"] as? [String: Any])?["key"] as? String == key)
+            }) {
+                // Заменяем существующую реакцию
+                self.reactionEvents[eventId]?[existingIndex] = event
             } else {
-                // Добавляем или обновляем реакцию
-                if let index = self.reactionEvents[eventId]?.firstIndex(where: { $0.eventId == event.eventId }) {
-                    self.reactionEvents[eventId]?[index] = event
-                } else {
-                    self.reactionEvents[eventId]?.append(event)
-                }
+                // Добавляем новую реакцию
+                self.reactionEvents[eventId]?.append(event)
             }
             
             // Обновляем сообщение с новыми реакциями
@@ -746,6 +875,11 @@ class MatrixService: ObservableObject {
         var reactionCounts: [String: (count: Int, users: [String])] = [:]
         
         for event in events {
+            // Пропускаем отозванные события
+            if event.isRedactedEvent() {
+                continue
+            }
+            
             guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
                   let key = relatesTo["key"] as? String else { continue }
             
@@ -755,16 +889,19 @@ class MatrixService: ObservableObject {
             
             // Упрощенная проверка на отозванное событие
             let isRedacted = event.isState()
-            if !isRedacted {
+            if !isRedacted, let sender = event.sender {
                 reactionCounts[key]?.count += 1
-                if let sender = event.sender {
-                    reactionCounts[key]?.users.append(sender)
-                }
+                reactionCounts[key]?.users.append(sender)
             }
         }
         
         return reactionCounts.map { emoji, data in
-            MessageReaction(emoji: emoji, count: data.count, users: data.users)
+            MessageReaction(
+                emoji: emoji,
+                count: data.count,
+                users: data.users,
+                didReact: data.users.contains(currentUserId ?? "")
+            )
         }.sorted { $0.count > $1.count }
     }
     
@@ -828,6 +965,65 @@ class MatrixService: ObservableObject {
                     break // Реакция успешно отправлена
                 case .failure(let error):
                     self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    // MARK: - Remove Reaction
+    func removeReaction(_ emoji: String, from messageId: String, in roomId: String) {
+        guard let room = mxSession?.room(withRoomId: roomId),
+              let events = reactionEvents[messageId] else { return }
+        
+        // Находим событие реакции, которое нужно удалить
+        let reactionEventToRemove = events.first { event in
+            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+                  let key = relatesTo["key"] as? String,
+                  let relEventId = relatesTo["event_id"] as? String,
+                  key == emoji,
+                  relEventId == messageId,
+                  event.sender == currentUserId else {
+                return false
+            }
+            return true
+        }
+        
+        guard let eventToRemove = reactionEventToRemove else { return }
+        
+        // Немедленно обновляем UI - удаляем реакцию локально
+        if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
+            var updatedMessage = self.messages[messageIndex]
+            // Удаляем реакцию из локального кэша
+            if let index = self.reactionEvents[messageId]?.firstIndex(where: { $0.eventId == eventToRemove.eventId }) {
+                self.reactionEvents[messageId]?.remove(at: index)
+            }
+            updatedMessage.reactions = self.calculateReactions(for: messageId)
+            self.messages[messageIndex] = updatedMessage
+            self.objectWillChange.send()
+        }
+        
+        // Отправляем отзыв события реакции
+        room.redactEvent(eventToRemove.eventId, reason: nil) { [weak self] (response: MXResponse<Void>) in
+            DispatchQueue.main.async {
+                switch response {
+                case .success:
+                    print("Реакция удалена")
+                    // Дополнительное обновление после успешного отзыва
+                    if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
+                        var updatedMessage = self?.messages[messageIndex]
+                        updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
+                        self?.messages[messageIndex] = updatedMessage!
+                        self?.objectWillChange.send()
+                    }
+                case .failure(let error):
+                    self?.error = "Ошибка при удалении реакции: \(error.localizedDescription)"
+                    // В случае ошибки - восстанавливаем реакцию в UI
+                    if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
+                        var updatedMessage = self?.messages[messageIndex]
+                        updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
+                        self?.messages[messageIndex] = updatedMessage!
+                        self?.objectWillChange.send()
+                    }
                 }
             }
         }
@@ -972,6 +1168,7 @@ class MatrixService: ObservableObject {
         hasSetupRoomListeners = false
         reactionEvents.removeAll()
     }
+    
 }
 
 // MARK: - Extensions
@@ -981,4 +1178,11 @@ extension MXRoom: Identifiable {
 
 extension String: Identifiable {
     public var id: String { self }
+}
+// MARK: - Extensions for Event Handling
+extension MXEvent {
+    func isRedactedEvent() -> Bool {
+        // Проверяем, является ли событие отзывом или отозванным событием
+        return self.eventType == .roomRedaction || self.isState()
+    }
 }
