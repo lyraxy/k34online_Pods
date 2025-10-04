@@ -238,6 +238,7 @@ struct ChatRoomView: View {
     @ObservedObject var matrixService: MatrixService
     let room: MXRoom
     @State private var messageText = ""
+    @State private var showReactionPickerForMessage: String? = nil
     
     var roomMessages: [Message] {
         matrixService.messages
@@ -280,8 +281,13 @@ struct ChatRoomView: View {
                             .padding(40)
                         } else {
                             ForEach(roomMessages) { message in
-                                MessageBubble(message: message)
-                                    .id(message.id)
+                                MessageBubble(
+                                    message: message,
+                                    matrixService: matrixService,
+                                    room: room,
+                                    showReactionPickerForMessage: $showReactionPickerForMessage
+                                )
+                                .id(message.id)
                             }
                         }
                     }
@@ -319,6 +325,13 @@ struct ChatRoomView: View {
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
         }
+        .sheet(item: $showReactionPickerForMessage) { messageId in
+            ReactionPickerView(
+                messageId: messageId,
+                matrixService: matrixService,
+                room: room
+            )
+        }
     }
     
     private func sendMessage() {
@@ -330,44 +343,139 @@ struct ChatRoomView: View {
     }
 }
 
+// MARK: - Message Bubble with Reactions
 struct MessageBubble: View {
     let message: Message
+    @ObservedObject var matrixService: MatrixService
+    let room: MXRoom
+    @Binding var showReactionPickerForMessage: String?
     
     var body: some View {
-        HStack {
-            if message.isOutgoing {
-                Spacer()
-            }
-            
-            VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
-                Text(message.sender.replacingOccurrences(of: ":k34.online", with: "", options: .literal, range: nil))
-                    .font(.caption)
-                    .foregroundColor(.gray)
+        VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
+            HStack {
+                if message.isOutgoing {
+                    Spacer()
+                }
                 
-                Text(message.text)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(message.isOutgoing ? Color.blue : Color.gray.opacity(0.2))
-                    .foregroundColor(message.isOutgoing ? .white : .primary)
-                    .cornerRadius(12)
+                VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
+                    Text(message.sender.replacingOccurrences(of: ":k34.online", with: "", options: .literal, range: nil))
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    
+                    Text(message.text)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(message.isOutgoing ? Color.blue : Color.gray.opacity(0.2))
+                        .foregroundColor(message.isOutgoing ? .white : .primary)
+                        .cornerRadius(12)
+                        .contextMenu {
+                            Button {
+                                showReactionPickerForMessage = message.id
+                            } label: {
+                                Label("Добавить реакцию", systemImage: "face.smiling")
+                            }
+                            
+                            Button {
+                                UIPasteboard.general.string = message.text
+                            } label: {
+                                Label("Копировать", systemImage: "doc.on.doc")
+                            }
+                        }
+                    
+                    // Отображение реакций
+                    if !message.reactions.isEmpty {
+                        ReactionsView(reactions: message.reactions)
+                            .padding(.top, 2)
+                    }
+                    
+                    Text(formatTimestamp(message.timestamp))
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
                 
-                Text(formatTimestamp(message.timestamp))
-                    .font(.caption2)
-                    .foregroundColor(.gray)
-            }
-            
-            if !message.isOutgoing {
-                Spacer()
+                if !message.isOutgoing {
+                    Spacer()
+                }
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
+        .onTapGesture(count: 2) {
+            // Двойное нажатие для быстрой реакции "👍"
+            matrixService.addReaction("👍", to: message.id, in: room.roomId)
+        }
+        .onLongPressGesture {
+            showReactionPickerForMessage = message.id
+        }
     }
     
     private func formatTimestamp(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+}
+
+// MARK: - Reactions View
+struct ReactionsView: View {
+    let reactions: [MessageReaction]
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(Array(reactions.enumerated()), id: \.offset) { index, reaction in
+                HStack(spacing: 4) {
+                    Text(reaction.emoji)
+                    Text("\(reaction.count)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.gray)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(12)
+            }
+        }
+    }
+}
+
+// MARK: - Reaction Picker View
+struct ReactionPickerView: View {
+    let messageId: String
+    @ObservedObject var matrixService: MatrixService
+    let room: MXRoom
+    @Environment(\.presentationMode) var presentationMode
+    
+    let commonReactions = ["👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉"]
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
+                    ForEach(commonReactions, id: \.self) { emoji in
+                        Button(action: {
+                            matrixService.addReaction(emoji, to: messageId, in: room.roomId)
+                            presentationMode.wrappedValue.dismiss()
+                        }) {
+                            Text(emoji)
+                                .font(.system(size: 30))
+                                .frame(width: 50, height: 50)
+                                .background(Color.gray.opacity(0.1))
+                                .cornerRadius(10)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Выберите реакцию")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Готово") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -403,6 +511,12 @@ struct ProfileView: View {
 }
 
 // MARK: - Models and Services
+struct MessageReaction {
+    let emoji: String
+    let count: Int
+    let users: [String]
+}
+
 struct Message: Identifiable {
     let id: String
     let text: String
@@ -410,6 +524,7 @@ struct Message: Identifiable {
     let timestamp: Date
     let roomId: String
     let isOutgoing: Bool
+    var reactions: [MessageReaction]
 }
 
 class MatrixService: ObservableObject {
@@ -427,6 +542,7 @@ class MatrixService: ObservableObject {
     private var userDisplayNames: [String: String] = [:]
     private var processedEventIds: Set<String> = []
     private var hasSetupRoomListeners = false
+    private var reactionEvents: [String: [MXEvent]] = [:] // Кэш реакций по messageId
 
     // MARK: - Login and Session Setup
     func login(username: String, password: String) {
@@ -486,9 +602,9 @@ class MatrixService: ObservableObject {
     }
     
     private func setupRoomListener(for room: MXRoom) {
-        let roomId = room.roomId
+        let roomId = room.roomId!
         
-        if let existingListener = roomListeners[roomId!] {
+        if let existingListener = roomListeners[roomId] {
             room.removeListener(existingListener)
         }
         
@@ -498,11 +614,11 @@ class MatrixService: ObservableObject {
             timeline.listenToEvents { [weak self] event, direction, roomState in
                 guard let self = self else { return }
                 
-                self.handleTimelineEvent(event, direction: direction, roomId: roomId!)
+                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
             }
         }
         
-        roomListeners[roomId!] = listener
+        roomListeners[roomId] = listener
     }
     
     // MARK: - Room Management
@@ -535,7 +651,7 @@ class MatrixService: ObservableObject {
     }
     
     private func paginateRoomHistory(timeline: MXEventTimeline, room: MXRoom) {
-        let roomId = room.roomId
+        let roomId = room.roomId!
         
         timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
             guard let self = self else { return }
@@ -549,14 +665,14 @@ class MatrixService: ObservableObject {
                 } else {
                     // Завершили загрузку истории
                     DispatchQueue.main.async {
-                        self.isLoadingHistory[roomId!] = false
+                        self.isLoadingHistory[roomId] = false
                         print("Завершена загрузка истории для комнаты: \(roomId)")
                     }
                 }
             case .failure(let error):
                 print("Ошибка загрузки истории: \(error)")
                 DispatchQueue.main.async {
-                    self.isLoadingHistory[roomId!] = false
+                    self.isLoadingHistory[roomId] = false
                 }
             }
         }
@@ -564,19 +680,92 @@ class MatrixService: ObservableObject {
     
     private func handleTimelineEvent(_ event: MXEvent, direction: MXTimelineDirection, roomId: String) {
         // Обрабатываем ВСЕ события
-        if let message = createMessage(from: event, roomId: roomId) {
-            DispatchQueue.main.async {
-                if !self.processedEventIds.contains(message.id) {
-                    self.processedEventIds.insert(message.id)
-                    self.messages.append(message)
-                    
-                    // Сортируем сообщения по времени
-                    self.messages.sort { $0.timestamp < $1.timestamp }
-                    
-                    self.objectWillChange.send()
+        if event.eventType == .roomMessage {
+            if let message = createMessage(from: event, roomId: roomId) {
+                DispatchQueue.main.async {
+                    if !self.processedEventIds.contains(message.id) {
+                        self.processedEventIds.insert(message.id)
+                        self.messages.append(message)
+                        
+                        // Сортируем сообщения по времени
+                        self.messages.sort { $0.timestamp < $1.timestamp }
+                        
+                        self.objectWillChange.send()
+                    }
+                }
+            }
+        } else if event.eventType == .reaction {
+            // Обрабатываем реакции
+            handleReactionEvent(event, roomId: roomId)
+        }
+    }
+    
+    private func handleReactionEvent(_ event: MXEvent, roomId: String) {
+        guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+              let relType = relatesTo["rel_type"] as? String,
+              relType == "m.annotation",
+              let eventId = relatesTo["event_id"] as? String,
+              let key = relatesTo["key"] as? String else {
+            return
+        }
+        
+        DispatchQueue.main.async {
+            // Обновляем кэш реакций
+            if self.reactionEvents[eventId] == nil {
+                self.reactionEvents[eventId] = []
+            }
+            
+            // В Matrix SDK 0.27.17 используем другой способ проверки отозванных событий
+            let isRedacted = event.isState() // Упрощенная проверка
+            
+            if isRedacted {
+                // Удаляем реакцию если событие было отозвано
+                self.reactionEvents[eventId]?.removeAll { $0.eventId == event.eventId }
+            } else {
+                // Добавляем или обновляем реакцию
+                if let index = self.reactionEvents[eventId]?.firstIndex(where: { $0.eventId == event.eventId }) {
+                    self.reactionEvents[eventId]?[index] = event
+                } else {
+                    self.reactionEvents[eventId]?.append(event)
+                }
+            }
+            
+            // Обновляем сообщение с новыми реакциями
+            if let messageIndex = self.messages.firstIndex(where: { $0.id == eventId }) {
+                var updatedMessage = self.messages[messageIndex]
+                updatedMessage.reactions = self.calculateReactions(for: eventId)
+                self.messages[messageIndex] = updatedMessage
+                self.objectWillChange.send()
+            }
+        }
+    }
+    
+    private func calculateReactions(for messageId: String) -> [MessageReaction] {
+        guard let events = reactionEvents[messageId] else { return [] }
+        
+        var reactionCounts: [String: (count: Int, users: [String])] = [:]
+        
+        for event in events {
+            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+                  let key = relatesTo["key"] as? String else { continue }
+            
+            if reactionCounts[key] == nil {
+                reactionCounts[key] = (0, [])
+            }
+            
+            // Упрощенная проверка на отозванное событие
+            let isRedacted = event.isState()
+            if !isRedacted {
+                reactionCounts[key]?.count += 1
+                if let sender = event.sender {
+                    reactionCounts[key]?.users.append(sender)
                 }
             }
         }
+        
+        return reactionCounts.map { emoji, data in
+            MessageReaction(emoji: emoji, count: data.count, users: data.users)
+        }.sorted { $0.count > $1.count }
     }
     
     private func createMessage(from event: MXEvent, roomId: String) -> Message? {
@@ -603,14 +792,45 @@ class MatrixService: ObservableObject {
             timestamp = Date()
         }
         
+        let messageId = event.eventId ?? UUID().uuidString
+        let reactions = calculateReactions(for: messageId)
+        
         return Message(
-            id: event.eventId ?? UUID().uuidString,
+            id: messageId,
             text: messageText,
             sender: event.sender ?? "Unknown",
             timestamp: timestamp,
             roomId: roomId,
-            isOutgoing: event.sender == self.currentUserId
+            isOutgoing: event.sender == self.currentUserId,
+            reactions: reactions
         )
+    }
+    
+    // MARK: - Reactions
+    func addReaction(_ emoji: String, to messageId: String, in roomId: String) {
+        guard let room = mxSession?.room(withRoomId: roomId) else { return }
+        
+        // В Matrix SDK 0.27.17 используем альтернативный метод для отправки реакций
+        // Создаем событие реакции вручную
+        let reactionContent: [String: Any] = [
+            "m.relates_to": [
+                "rel_type": "m.annotation",
+                "event_id": messageId,
+                "key": emoji
+            ]
+        ]
+        var localEcho: MXEvent?
+        // Отправляем событие реакции
+        room.sendEvent(.reaction, content: reactionContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+            DispatchQueue.main.async {
+                switch response {
+                case .success:
+                    break // Реакция успешно отправлена
+                case .failure(let error):
+                    self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
+                }
+            }
+        }
     }
     
     // MARK: - Room Creation
@@ -626,7 +846,7 @@ class MatrixService: ObservableObject {
         parameters.isDirect = true
         parameters.visibility = kMXRoomDirectoryVisibilityPrivate
         
-        session.createRoom(parameters: parameters) { [weak self] response in
+        session.createRoom(parameters: parameters) { [weak self] (response: MXResponse<MXRoom>) in
             DispatchQueue.main.async {
                 switch response {
                 case .success(let room):
@@ -648,9 +868,8 @@ class MatrixService: ObservableObject {
             error = "Комната не найдена"
             return
         }
-        
         var localEcho: MXEvent?
-        room.sendTextMessage(text, localEcho: &localEcho) { [weak self] response in
+        room.sendTextMessage(text, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
             DispatchQueue.main.async {
                 if case .failure(let error) = response {
                     self?.error = "Ошибка отправки: \(error.localizedDescription)"
@@ -721,7 +940,7 @@ class MatrixService: ObservableObject {
     }
     
     func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
-        mxSession?.matrixRestClient.displayName(forUser: userId) { response in
+        mxSession?.matrixRestClient.displayName(forUser: userId) { (response: MXResponse<String>) in
             switch response {
             case .success(let displayName):
                 completion(displayName)
@@ -751,10 +970,15 @@ class MatrixService: ObservableObject {
         isLoadingHistory.removeAll()
         processedEventIds.removeAll()
         hasSetupRoomListeners = false
+        reactionEvents.removeAll()
     }
 }
 
 // MARK: - Extensions
 extension MXRoom: Identifiable {
     public var id: String { roomId }
+}
+
+extension String: Identifiable {
+    public var id: String { self }
 }
