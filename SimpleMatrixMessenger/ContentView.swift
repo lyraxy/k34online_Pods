@@ -114,6 +114,7 @@ struct ChatRow: View {
     let room: MXRoom
     @ObservedObject var matrixService: MatrixService
     @State private var displayName: String = ""
+    @State private var lastMessageText: String = "Пока нет сообщений"
     
     var body: some View {
         HStack {
@@ -123,10 +124,13 @@ struct ChatRow: View {
                     .onAppear {
                         updateDisplayName()
                     }
-                Text(getLastMessagePreview(room))
+                Text(lastMessageText)
                     .font(.subheadline)
                     .foregroundColor(.gray)
                     .lineLimit(1)
+                    .onAppear {
+                        updateLastMessagePreview()
+                    }
             }
             Spacer()
             
@@ -140,14 +144,15 @@ struct ChatRow: View {
             }
         }
         .padding(.vertical, 4)
+        .onReceive(matrixService.$messages) { _ in
+            updateLastMessagePreview()
+        }
     }
     
     private func updateDisplayName() {
-        // Get initial display name
         let initialName = matrixService.getDisplayName(for: room)
         displayName = initialName
         
-        // Try to load better display name if it's a user ID
         if initialName.contains("@") && initialName.contains(":") {
             matrixService.loadUserDisplayName(userId: initialName) { betterName in
                 if let betterName = betterName, !betterName.isEmpty {
@@ -157,16 +162,27 @@ struct ChatRow: View {
         }
     }
     
+    private func updateLastMessagePreview() {
+        lastMessageText = getLastMessagePreview(room)
+    }
+    
     private func getLastMessagePreview(_ room: MXRoom) -> String {
-        guard let lastMessage = room.summary?.lastMessage else {
-            return "Пока нет сообщений"
+        // Простой способ: используем text из lastMessage
+        if let lastMessage = room.summary?.lastMessage,
+           let text = lastMessage.text, !text.isEmpty {
+            return text
         }
         
-        if let content = lastMessage.text as? String {
-            return content
+        // Альтернативный способ: ищем в загруженных сообщениях
+        let roomMessages = matrixService.messages
+            .filter { $0.roomId == room.roomId }
+            .sorted { $0.timestamp > $1.timestamp }
+        
+        if let lastMessage = roomMessages.first {
+            return lastMessage.text
         }
         
-        return "Новое сообщение"
+        return "Пока нет сообщений"
     }
 }
 
@@ -245,8 +261,7 @@ struct ChatRoomView: View {
     
     var body: some View {
         VStack {
-            // Индикатор загрузки
-            if isLoading {
+            if false {//isLoading {
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
@@ -616,7 +631,7 @@ class MatrixService: ObservableObject {
             return "Личный чат"
         }
         
-        // Для групповых чатов используем displayName из summary
+        // Для групповых чатов используем displayname из summary (обратите внимание на строчные буквы)
         if let summary = room.summary, let displayName = summary.displayName, !displayName.isEmpty {
             return displayName
         }
@@ -626,7 +641,7 @@ class MatrixService: ObservableObject {
             return extractUsername(from: otherUserId)
         }
         
-        return room.roomId // Финальный fallback
+        return "Чат" // Финальный fallback
     }
     
     private func extractUserIdFromRoomId(_ roomId: String) -> String? {
