@@ -209,19 +209,30 @@ struct ChatListView: View {
                     
                     List {
                         if matrixService.rooms.isEmpty {
-                            VStack(spacing: 20) {
-                                Image(systemName: "message")
-                                    .font(.system(size: 50))
+                            // ИСПРАВЛЕННЫЙ БЛОК: Центрированное и красивое сообщение о пустом списке
+                            VStack(spacing: 25) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 60))
                                     .foregroundColor(K34Colors.lightGray)
-                                Text("Пока нет чатов")
-                                    .font(.title2)
-                                    .foregroundColor(K34Colors.textPrimary)
-                                Text("Начните новый чат!")
-                                    .font(.body)
-                                    .foregroundColor(K34Colors.textSecondary)
+                                    .padding(.bottom, 5)
+                                
+                                VStack(spacing: 12) {
+                                    Text("Пока нет чатов")
+                                        .font(.title2)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(K34Colors.textPrimary)
+                                    
+                                    Text("Начните новый чат, чтобы начать общение!")
+                                        .font(.body)
+                                        .foregroundColor(K34Colors.textSecondary)
+                                        .multilineTextAlignment(.center)
+                                        .lineSpacing(4)
+                                }
+                                .padding(.horizontal, 20)
                             }
-                            .frame(height: 300)
-                            .listRowBackground(K34Colors.cardBackground).multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, minHeight: 300)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets())
                         } else {
                             ForEach(matrixService.rooms, id: \.roomId) { room in
                                 ZStack {
