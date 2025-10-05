@@ -233,6 +233,8 @@ struct ChatListView: View {
     @State private var selectedRoomId: String?
     @State private var showingLeaveAlert = false
     @State private var roomToLeave: MXRoom?
+    @State private var lastUpdateTime = Date()
+    @State private var timer: Timer?
     
     var activeRooms: [MXRoom] {
         matrixService.rooms.filter { room in
@@ -303,10 +305,14 @@ struct ChatListView: View {
                             }
                         } header: {
                             if !activeRooms.isEmpty {
-                                Text("Активные чаты")
-                                    .font(.headline)
-                                    .foregroundColor(K34Colors.textPrimary)
-                                    .padding(.bottom, 5)
+                                HStack {
+                                    Text("Активные чаты")
+                                        .font(.headline)
+                                        .foregroundColor(K34Colors.textPrimary)
+                                    
+                                    Spacer()
+                                }
+                                .padding(.bottom, 5)
                             }
                         }
                     }
@@ -314,20 +320,40 @@ struct ChatListView: View {
                     .background(K34Colors.background)
                     .scrollContentBackground(.hidden)
                     .animation(.default, value: matrixService.rooms.count)
+                    .refreshable {
+                        await refreshRooms()
+                    }
                 }
                 .navigationTitle("Чаты")
                 .navigationBarTitleDisplayMode(.large)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(action: {
-                            matrixService.loadRooms()
-                        }) {
-                            Image(systemName: "arrow.clockwise")
-                                .foregroundColor(K34Colors.primaryRed)
+                        HStack {
+                            if matrixService.isLoadingRooms {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                                    .scaleEffect(0.8)
+                            }
+                            
+                            Button(action: {
+                                manualRefresh()
+                            }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundColor(K34Colors.primaryRed)
+                            }
+                            .disabled(matrixService.isLoadingRooms)
                         }
                     }
                 }
             }
+        }
+        .onAppear {
+            startBackgroundRefresh()
+            // Первоначальная загрузка при появлении
+            matrixService.loadRooms()
+        }
+        .onDisappear {
+            stopBackgroundRefresh()
         }
         .alert("Покинуть чат", isPresented: $showingLeaveAlert) {
             Button("Отмена", role: .cancel) { }
@@ -393,6 +419,40 @@ struct ChatListView: View {
             }
         }
     }
+    
+    private func startBackgroundRefresh() {
+        // Запускаем таймер для фонового обновления каждые 30 секунд
+        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+            backgroundRefresh()
+        }
+    }
+    
+    private func stopBackgroundRefresh() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    private func backgroundRefresh() {
+        matrixService.backgroundRefreshRooms()
+        updateLastUpdateTime()
+    }
+    
+    private func manualRefresh() {
+        matrixService.loadRooms()
+        updateLastUpdateTime()
+    }
+    
+    @MainActor
+    private func refreshRooms() async {
+        matrixService.loadRooms()
+        updateLastUpdateTime()
+        // Даем немного времени для анимации pull-to-refresh
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+    
+    private func updateLastUpdateTime() {
+        lastUpdateTime = Date()
+    }
 }
 
 // MARK: - Chat Row
@@ -402,8 +462,10 @@ struct ChatRow: View {
     var onLeaveRoom: (() -> Void)? = nil
     @State private var displayName: String = ""
     @State private var lastMessageText: String = "Пока нет сообщений"
+    @State private var lastMessageTime: String = ""
     @State private var roomStatus: RoomStatus?
     @State private var showingContextMenu = false
+    @State private var updateTrigger = 0
     
     var body: some View {
         HStack(spacing: 15) {
@@ -450,6 +512,10 @@ struct ChatRow: View {
                     .font(.system(size: 14))
                     .foregroundColor(K34Colors.textSecondary)
                     .lineLimit(1)
+                
+                Text(lastMessageTime)
+                    .font(.system(size: 12))
+                    .foregroundColor(K34Colors.lightGray)
             }
             
             Spacer()
@@ -467,12 +533,21 @@ struct ChatRow: View {
         .padding(.vertical, 4)
         .onAppear {
             updateDisplayInfo()
+            startAutoRefresh()
         }
         .onReceive(matrixService.$messages) { _ in
             updateLastMessagePreview()
         }
         .onReceive(matrixService.objectWillChange) { _ in
             updateDisplayInfo()
+        }
+        .onReceive(matrixService.$lastRoomUpdate) { _ in
+            // Обновляем превью при глобальном обновлении комнат
+            updateLastMessagePreview()
+        }
+        .onChange(of: updateTrigger) { _ in
+            // Принудительное обновление по таймеру
+            updateLastMessagePreview()
         }
         .contextMenu {
             if roomStatus?.isInvited != true && roomStatus?.isInvitationOutgoing != true {
@@ -557,7 +632,16 @@ struct ChatRow: View {
     }
     
     private func updateLastMessagePreview() {
-        lastMessageText = matrixService.getLastMessagePreview(for: room)
+        let preview = matrixService.getLastMessagePreview(for: room)
+        lastMessageText = preview.text
+        lastMessageTime = preview.time
+    }
+    
+    private func startAutoRefresh() {
+        // Обновляем превью каждые 10 секунд
+        Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
+            updateTrigger += 1
+        }
     }
 }
 
@@ -697,9 +781,10 @@ struct ChatRoomView: View {
                     }
                     
                     Button {
-                        matrixService.loadRooms()
+                        // Принудительно перезагружаем комнату
+                        matrixService.joinRoom(roomId: room.roomId)
                     } label: {
-                        Label("Обновить", systemImage: "arrow.clockwise")
+                        Label("Обновить чат", systemImage: "arrow.clockwise")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -708,10 +793,15 @@ struct ChatRoomView: View {
             }
         }
         .onAppear {
+            // Всегда загружаем историю при входе в комнату, независимо от статуса
             matrixService.joinRoom(roomId: room.roomId)
             updateRoomStatus()
         }
         .onReceive(matrixService.objectWillChange) { _ in
+            updateRoomStatus()
+        }
+        .onReceive(matrixService.$lastRoomUpdate) { _ in
+            // Принудительно обновляем представление при обновлении комнат
             updateRoomStatus()
         }
         .sheet(item: $showReactionPickerForMessage) { messageId in
@@ -872,7 +962,10 @@ struct ChatRoomView: View {
     private func acceptInvitation() {
         matrixService.acceptInvitation(roomId: room.roomId) { success in
             if success {
-                // Автоматически перейдет в обычный режим чата
+                // После принятия приглашения сразу загружаем историю комнаты
+                matrixService.joinRoom(roomId: room.roomId)
+                // Обновляем статус комнаты
+                updateRoomStatus()
             }
         }
     }
@@ -1202,11 +1295,11 @@ struct ProfileView: View {
                     Spacer()
                     
                     VStack(spacing: 10) {
-                        Text("K-34 Online Messenger")
+                        Text("K-34 Online")
                             .font(.caption)
                             .foregroundColor(K34Colors.textSecondary)
                         
-                        Text("Secure • Private • Reliable")
+                        Text("Безопасно • Быстро • Надежно")
                             .font(.caption2)
                             .foregroundColor(K34Colors.lightGray)
                     }
@@ -1224,11 +1317,13 @@ class MatrixService: ObservableObject {
     @Published var messages: [Message] = []
     @Published var rooms: [MXRoom] = []
     @Published var isLoading = false
+    @Published var isLoadingRooms = false
     @Published var error: String?
     @Published var isLoggedIn = false
     @Published var currentUserId: String?
     @Published var isLoadingHistory: [String: Bool] = [:]
     @Published var roomStatuses: [String: RoomStatus] = [:]
+    @Published var lastRoomUpdate = Date()
     
     private var mxRestClient: MXRestClient?
     private var mxSession: MXSession?
@@ -1237,6 +1332,7 @@ class MatrixService: ObservableObject {
     private var processedEventIds: Set<String> = []
     private var hasSetupRoomListeners = false
     private var reactionEvents: [String: [MXEvent]] = [:]
+    private var backgroundRefreshTimer: Timer?
 
     // MARK: - Login and Session Setup
     func login(username: String, password: String) {
@@ -1275,6 +1371,7 @@ class MatrixService: ObservableObject {
             if case .success = response {
                 self.loadRooms()
                 self.setupAllRoomListeners()
+                self.startBackgroundRefresh()
             } else if case .failure(let error) = response {
                 self.error = error.localizedDescription
             }
@@ -1283,8 +1380,42 @@ class MatrixService: ObservableObject {
     
     func loadRooms() {
         guard let session = mxSession else { return }
+        
+        isLoadingRooms = true
         rooms = session.rooms ?? []
         updateRoomStatuses()
+        
+        // Имитируем загрузку для лучшего UX
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.isLoadingRooms = false
+            self.lastRoomUpdate = Date()
+        }
+    }
+    
+    func backgroundRefreshRooms() {
+        guard let session = mxSession, !isLoadingRooms else { return }
+        
+        // Тихий фоновый refresh без индикатора загрузки
+        let previousRooms = rooms
+        rooms = session.rooms ?? []
+        updateRoomStatuses()
+        
+        // Обновляем lastRoomUpdate только если есть изменения
+        if rooms != previousRooms {
+            lastRoomUpdate = Date()
+        }
+    }
+    
+    private func startBackgroundRefresh() {
+        // Фоновое обновление каждые 30 секунд
+        backgroundRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.backgroundRefreshRooms()
+        }
+    }
+    
+    private func stopBackgroundRefresh() {
+        backgroundRefreshTimer?.invalidate()
+        backgroundRefreshTimer = nil
     }
     
     // MARK: - Room Status Management
@@ -1369,6 +1500,7 @@ class MatrixService: ObservableObject {
                         self?.roomListeners.removeValue(forKey: roomId)
                     }
                     self?.error = nil
+                    self?.lastRoomUpdate = Date()
                     completion?(true)
                 case .failure(let error):
                     self?.error = "Ошибка при выходе из чата: \(error.localizedDescription)"
@@ -1389,6 +1521,9 @@ class MatrixService: ObservableObject {
             DispatchQueue.main.async {
                 switch response {
                 case .success:
+                    // После успешного принятия приглашения настраиваем слушатель и загружаем историю
+                    self?.setupRoomListener(for: room)
+                    self?.loadRoomHistoryAfterAcceptingInvitation(for: room)
                     self?.loadRooms()
                     self?.updateRoomStatuses()
                     completion(true)
@@ -1396,6 +1531,76 @@ class MatrixService: ObservableObject {
                     self?.error = "Ошибка принятия приглашения: \(error.localizedDescription)"
                     completion(false)
                 }
+            }
+        }
+    }
+    
+    private func loadRoomHistoryAfterAcceptingInvitation(for room: MXRoom) {
+        let roomId = room.roomId!
+        
+        // Устанавливаем флаг загрузки для этой комнаты
+        isLoadingHistory[roomId] = true
+        
+        room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else {
+                DispatchQueue.main.async {
+                    self?.isLoadingHistory[roomId] = false
+                }
+                return
+            }
+            
+            // Сбрасываем пагинацию и загружаем историю
+            timeline.resetPagination()
+            self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
+        }
+    }
+    
+    private func paginateRoomHistoryAfterAcceptingInvitation(timeline: MXEventTimeline, room: MXRoom) {
+        let roomId = room.roomId!
+        
+        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
+            guard let self = self else { return }
+            
+            switch response {
+            case .success:
+                if timeline.canPaginate(.backwards) {
+                    self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
+                } else {
+                    // После загрузки истории запускаем прослушивание новых событий
+                    self.startListeningToRoomEvents(room)
+                    DispatchQueue.main.async {
+                        self.isLoadingHistory[roomId] = false
+                        self.lastRoomUpdate = Date()
+                    }
+                }
+            case .failure(let error):
+                print("Ошибка загрузки истории после принятия приглашения: \(error)")
+                // Все равно запускаем прослушивание новых событий
+                self.startListeningToRoomEvents(room)
+                DispatchQueue.main.async {
+                    self.isLoadingHistory[roomId] = false
+                }
+            }
+        }
+    }
+    
+    private func startListeningToRoomEvents(_ room: MXRoom) {
+        let roomId = room.roomId!
+        
+        room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else { return }
+            
+            // Начинаем слушать события в реальном времени
+            timeline.listenToEvents { [weak self] event, direction, roomState in
+                guard let self = self else { return }
+                
+                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
+            }
+            
+            // Обрабатываем существующие события из store
+            timeline.resetPagination()
+            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
+                // После загрузки существующих событий timeline будет содержать их
             }
         }
     }
@@ -1417,17 +1622,26 @@ class MatrixService: ObservableObject {
     private func setupRoomListener(for room: MXRoom) {
         let roomId = room.roomId!
         
+        // Удаляем существующий слушатель, если есть
         if let existingListener = roomListeners[roomId] {
             room.removeListener(existingListener)
         }
         
+        // Создаем нового слушателя
         let listener = room.liveTimeline { [weak self] timeline in
             guard let self = self, let timeline = timeline else { return }
             
+            // Слушаем новые события
             timeline.listenToEvents { [weak self] event, direction, roomState in
                 guard let self = self else { return }
                 
                 self.handleTimelineEvent(event, direction: direction, roomId: roomId)
+            }
+            
+            // Загружаем существующие события из store
+            timeline.resetPagination()
+            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
+                // События теперь будут доступны через listenToEvents
             }
         }
         
@@ -1438,6 +1652,10 @@ class MatrixService: ObservableObject {
     func joinRoom(roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId) else { return }
         
+        // Убеждаемся, что слушатель настроен
+        setupRoomListener(for: room)
+        
+        // Загружаем историю комнаты
         isLoadingHistory[roomId] = true
         loadRoomHistory(for: room)
     }
@@ -1471,6 +1689,7 @@ class MatrixService: ObservableObject {
                 } else {
                     DispatchQueue.main.async {
                         self.isLoadingHistory[roomId] = false
+                        self.lastRoomUpdate = Date()
                     }
                 }
             case .failure(let error):
@@ -1486,6 +1705,7 @@ class MatrixService: ObservableObject {
         if event.eventType == .roomMember {
             DispatchQueue.main.async {
                 self.updateRoomStatuses()
+                self.lastRoomUpdate = Date()
             }
         }
         
@@ -1496,6 +1716,7 @@ class MatrixService: ObservableObject {
                         self.processedEventIds.insert(message.id)
                         self.messages.append(message)
                         self.messages.sort { $0.timestamp < $1.timestamp }
+                        self.lastRoomUpdate = Date()
                         self.objectWillChange.send()
                     }
                 }
@@ -1524,6 +1745,7 @@ class MatrixService: ObservableObject {
                 }
             }
             
+            self.lastRoomUpdate = Date()
             self.objectWillChange.send()
         }
     }
@@ -1560,6 +1782,7 @@ class MatrixService: ObservableObject {
                 var updatedMessage = self.messages[messageIndex]
                 updatedMessage.reactions = self.calculateReactions(for: eventId)
                 self.messages[messageIndex] = updatedMessage
+                self.lastRoomUpdate = Date()
                 self.objectWillChange.send()
             }
         }
@@ -1638,6 +1861,55 @@ class MatrixService: ObservableObject {
         )
     }
     
+    // MARK: - Last Message Preview
+    struct MessagePreview {
+        let text: String
+        let time: String
+    }
+    
+    func getLastMessagePreview(for room: MXRoom) -> MessagePreview {
+        let roomMessages = messages
+            .filter { $0.roomId == room.roomId }
+            .sorted { $0.timestamp > $1.timestamp }
+        
+        if let lastMessage = roomMessages.first {
+            let timeFormatter = DateFormatter()
+            timeFormatter.timeStyle = .short
+            let timeString = timeFormatter.string(from: lastMessage.timestamp)
+            
+            return MessagePreview(
+                text: lastMessage.text,
+                time: timeString
+            )
+        }
+        
+        if let lastMessage = room.summary?.lastMessage,
+           let text = lastMessage.text, !text.isEmpty {
+            
+            let timeFormatter = DateFormatter()
+            timeFormatter.timeStyle = .short
+            let timeString: String
+            
+            // Исправление: используем originServerTs вместо timestamp
+            if lastMessage.originServerTs != 0 {
+                let date = Date(timeIntervalSince1970: TimeInterval(lastMessage.originServerTs / 1000))
+                timeString = timeFormatter.string(from: date)
+            } else {
+                timeString = ""
+            }
+            
+            return MessagePreview(
+                text: text,
+                time: timeString
+            )
+        }
+        
+        return MessagePreview(
+            text: "Пока нет сообщений",
+            time: ""
+        )
+    }
+    
     // MARK: - Reactions
     func addReaction(_ emoji: String, to messageId: String, in roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId) else { return }
@@ -1655,7 +1927,7 @@ class MatrixService: ObservableObject {
             DispatchQueue.main.async {
                 switch response {
                 case .success:
-                    break
+                    self?.lastRoomUpdate = Date()
                 case .failure(let error):
                     self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
                 }
@@ -1688,6 +1960,7 @@ class MatrixService: ObservableObject {
             }
             updatedMessage.reactions = self.calculateReactions(for: messageId)
             self.messages[messageIndex] = updatedMessage
+            self.lastRoomUpdate = Date()
             self.objectWillChange.send()
         }
         
@@ -1699,6 +1972,7 @@ class MatrixService: ObservableObject {
                         var updatedMessage = self?.messages[messageIndex]
                         updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
                         self?.messages[messageIndex] = updatedMessage!
+                        self?.lastRoomUpdate = Date()
                         self?.objectWillChange.send()
                     }
                 case .failure(let error):
@@ -1707,6 +1981,7 @@ class MatrixService: ObservableObject {
                         var updatedMessage = self?.messages[messageIndex]
                         updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
                         self?.messages[messageIndex] = updatedMessage!
+                        self?.lastRoomUpdate = Date()
                         self?.objectWillChange.send()
                     }
                 }
@@ -1721,7 +1996,7 @@ class MatrixService: ObservableObject {
             completion(false)
             return
         }
-        
+    
         let parameters = MXRoomCreationParameters()
         parameters.inviteArray = [userId]
         parameters.isDirect = true
@@ -1735,6 +2010,7 @@ class MatrixService: ObservableObject {
                     self?.error = nil
                     self?.setupRoomListener(for: room)
                     self?.updateRoomStatuses()
+                    self?.lastRoomUpdate = Date()
                     completion(true)
                 case .failure(let error):
                     self?.error = "Ошибка при создании чата: \(error.localizedDescription)"
@@ -1755,6 +2031,8 @@ class MatrixService: ObservableObject {
             DispatchQueue.main.async {
                 if case .failure(let error) = response {
                     self?.error = "Ошибка отправки: \(error.localizedDescription)"
+                } else {
+                    self?.lastRoomUpdate = Date()
                 }
             }
         }
@@ -1801,24 +2079,6 @@ class MatrixService: ObservableObject {
         return userId
     }
     
-    // MARK: - Last Message Preview
-    func getLastMessagePreview(for room: MXRoom) -> String {
-        let roomMessages = messages
-            .filter { $0.roomId == room.roomId }
-            .sorted { $0.timestamp > $1.timestamp }
-        
-        if let lastMessage = roomMessages.first {
-            return lastMessage.text
-        }
-        
-        if let lastMessage = room.summary?.lastMessage,
-           let text = lastMessage.text, !text.isEmpty {
-            return text
-        }
-        
-        return "Пока нет сообщений"
-    }
-    
     func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
         mxSession?.matrixRestClient.displayName(forUser: userId) { (response: MXResponse<String>) in
             switch response {
@@ -1832,6 +2092,8 @@ class MatrixService: ObservableObject {
     
     // MARK: - Logout
     func logout() {
+        stopBackgroundRefresh()
+        
         for (roomId, listener) in roomListeners {
             if let room = mxSession?.room(withRoomId: roomId) {
                 room.removeListener(listener)
@@ -1852,6 +2114,7 @@ class MatrixService: ObservableObject {
         hasSetupRoomListeners = false
         reactionEvents.removeAll()
         roomStatuses.removeAll()
+        lastRoomUpdate = Date()
     }
 }
 
