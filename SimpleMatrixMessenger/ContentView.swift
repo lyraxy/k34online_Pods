@@ -79,6 +79,7 @@ struct Message: Identifiable {
     let fileName: String?
     let fileSize: Int?
     let duration: TimeInterval?
+    var isVoicePlaying: Bool = false // Новое поле для отслеживания состояния воспроизведения
 }
 
 enum MessageType {
@@ -291,16 +292,23 @@ class VoiceMessagePlayer: NSObject, ObservableObject {
     @Published var isPlaying = false
     @Published var currentPlaybackTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
+    @Published var currentMessageId: String?
     
     private var timer: Timer?
     
-    func playAudio(from data: Data) {
+    func playAudio(from data: Data, messageId: String) {
+        // Останавливаем предыдущее воспроизведение
+        stopPlayback()
+        
         do {
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.delegate = self
             audioPlayer?.play()
             isPlaying = true
+            currentMessageId = messageId
             duration = audioPlayer?.duration ?? 0
+            
+            print("DEBUG: Playing audio - Duration: \(duration)s, Message ID: \(messageId)")
             
             timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 guard let self = self, let player = self.audioPlayer else { return }
@@ -315,6 +323,8 @@ class VoiceMessagePlayer: NSObject, ObservableObject {
         audioPlayer?.stop()
         isPlaying = false
         currentPlaybackTime = 0
+        currentMessageId = nil
+        duration = 0
         timer?.invalidate()
         timer = nil
     }
@@ -323,12 +333,22 @@ class VoiceMessagePlayer: NSObject, ObservableObject {
         audioPlayer?.currentTime = time
         currentPlaybackTime = time
     }
+    
+    func togglePlayback(for data: Data, messageId: String) {
+        if isPlaying && currentMessageId == messageId {
+            stopPlayback()
+        } else {
+            playAudio(from: data, messageId: messageId)
+        }
+    }
 }
 
 extension VoiceMessagePlayer: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         isPlaying = false
         currentPlaybackTime = 0
+        currentMessageId = nil
+        duration = 0
         timer?.invalidate()
         timer = nil
     }
@@ -1455,12 +1475,13 @@ struct VoiceMessagePreview: View {
 }
 
 // MARK: - Message Bubble with Reactions
+// MARK: - Message Bubble with Reactions
 struct MessageBubble: View {
     let message: Message
     @ObservedObject var matrixService: MatrixService
     let room: MXRoom
     @Binding var showReactionPickerForMessage: String?
-    @StateObject private var voicePlayer = VoiceMessagePlayer()
+    @StateObject private var voicePlayer = VoiceMessagePlayer() // Теперь каждый пузырек имеет свой плеер
     
     var body: some View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
@@ -1524,6 +1545,14 @@ struct MessageBubble: View {
                             Label("Копировать", systemImage: "doc.on.doc")
                         }
                     }
+                    
+                    if message.messageType == .voice {
+                        Button {
+                            // Действие для голосового сообщения
+                        } label: {
+                            Label("Действия с аудио", systemImage: "speaker.wave.2")
+                        }
+                    }
                 }
                 
                 if !message.isOutgoing {
@@ -1540,6 +1569,7 @@ struct MessageBubble: View {
             showReactionPickerForMessage = message.id
         }
         .onDisappear {
+            // Останавливаем воспроизведение при исчезновении пузырька
             voicePlayer.stopPlayback()
         }
     }
@@ -1620,53 +1650,63 @@ struct FileMessageView: View {
 }
 
 // MARK: - Voice Message View
+// MARK: - Voice Message View
+// MARK: - Voice Message View
 struct VoiceMessageView: View {
     let message: Message
     @ObservedObject var matrixService: MatrixService
     @ObservedObject var voicePlayer: VoiceMessagePlayer
     @State private var audioData: Data?
+    @State private var isLoading = false
+    @State private var actualDuration: TimeInterval = 0
     
     var body: some View {
         HStack(spacing: 12) {
+            // Кнопка воспроизведения/паузы
             Button(action: {
-                if voicePlayer.isPlaying {
-                    voicePlayer.stopPlayback()
-                } else {
-                    if let data = audioData {
-                        voicePlayer.playAudio(from: data)
-                    } else {
-                        matrixService.downloadMedia(for: message) { data in
-                            if let data = data {
-                                audioData = data
-                                voicePlayer.playAudio(from: data)
-                            }
-                        }
-                    }
-                }
+                togglePlayback()
             }) {
-                Image(systemName: voicePlayer.isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                Image(systemName: getPlayButtonIcon())
                     .font(.title2)
                     .foregroundColor(K34Colors.primaryRed)
+                    .frame(width: 30, height: 30)
             }
+            .disabled(isLoading)
             
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Голосовое сообщение")
-                    .font(.headline)
+            // Прогресс-бар и время
+            VStack(alignment: .leading, spacing: 6) {
+                Text("🎤 Голосовое сообщение")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
                     .foregroundColor(K34Colors.textPrimary)
                 
-                if let duration = message.duration {
-                    Text(formatTime(voicePlayer.isPlaying ? voicePlayer.currentPlaybackTime : duration))
+                HStack(spacing: 8) {
+                    Text(formatTime(getCurrentTime()))
                         .font(.caption)
                         .foregroundColor(K34Colors.textSecondary)
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .leading)
+                    
+                    // Прогресс-бар
+                    ProgressView(value: getCurrentTime(), total: getDuration())
+                        .progressViewStyle(LinearProgressViewStyle(tint: K34Colors.primaryRed))
+                        .scaleEffect(x: 1, y: 1.2, anchor: .center)
+                    
+                    Text(formatTime(getDuration()))
+                        .font(.caption)
+                        .foregroundColor(K34Colors.textSecondary)
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
                 }
             }
             
             Spacer()
             
-            if voicePlayer.isPlaying, voicePlayer.duration > 0 {
-                ProgressView(value: voicePlayer.currentPlaybackTime, total: voicePlayer.duration)
-                    .progressViewStyle(LinearProgressViewStyle(tint: K34Colors.primaryRed))
-                    .frame(width: 60)
+            // Индикатор загрузки
+            if isLoading {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                    .scaleEffect(0.8)
             }
         }
         .padding(12)
@@ -1676,15 +1716,99 @@ struct VoiceMessageView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(K34Colors.lightGray, lineWidth: 1)
         )
+        .onAppear {
+            // Предзагружаем аудио, если оно еще не загружено
+            if audioData == nil && !isLoading {
+                loadAudioData()
+            }
+        }
+    }
+    
+    private func togglePlayback() {
+        if voicePlayer.isPlaying && voicePlayer.currentMessageId == message.id {
+            voicePlayer.stopPlayback()
+        } else {
+            if let data = audioData {
+                voicePlayer.playAudio(from: data, messageId: message.id)
+            } else {
+                loadAndPlayAudio()
+            }
+        }
+    }
+    
+    private func getPlayButtonIcon() -> String {
+        if isLoading {
+            return "hourglass"
+        } else if voicePlayer.isPlaying && voicePlayer.currentMessageId == message.id {
+            return "stop.circle.fill"
+        } else {
+            return "play.circle.fill"
+        }
+    }
+    
+    private func getCurrentTime() -> TimeInterval {
+        if voicePlayer.isPlaying && voicePlayer.currentMessageId == message.id {
+            return voicePlayer.currentPlaybackTime
+        } else {
+            return 0
+        }
+    }
+    
+    private func getDuration() -> TimeInterval {
+        // Приоритеты для определения длительности:
+        // 1. Длительность из плеера (во время воспроизведения)
+        // 2. Фактическая длительность из загруженных данных
+        // 3. Длительность из сообщения
+        // 4. Fallback значение
+        
+        if voicePlayer.isPlaying && voicePlayer.currentMessageId == message.id && voicePlayer.duration > 0 {
+            return voicePlayer.duration
+        } else if actualDuration > 0 {
+            return actualDuration
+        } else if let messageDuration = message.duration, messageDuration > 0 {
+            return messageDuration
+        } else {
+            return 10 // fallback 10 секунд
+        }
+    }
+    
+    private func loadAndPlayAudio() {
+        isLoading = true
+        matrixService.downloadMedia(for: message) { data in
+            isLoading = false
+            if let data = data {
+                audioData = data
+                // Получаем фактическую длительность из данных
+                if let player = try? AVAudioPlayer(data: data) {
+                    self.actualDuration = player.duration
+                    print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+                }
+                voicePlayer.playAudio(from: data, messageId: message.id)
+            }
+        }
+    }
+    
+    private func loadAudioData() {
+        isLoading = true
+        matrixService.downloadMedia(for: message) { data in
+            isLoading = false
+            if let data = data {
+                audioData = data
+                // Получаем фактическую длительность из данных
+                if let player = try? AVAudioPlayer(data: data) {
+                    self.actualDuration = player.duration
+                    print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+                }
+            }
+        }
     }
     
     private func formatTime(_ time: TimeInterval) -> String {
         let minutes = Int(time) / 60
         let seconds = Int(time) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }
-
 // MARK: - Image Message View
 struct ImageMessageView: View {
     let message: Message
@@ -2538,12 +2662,14 @@ class MatrixService: ObservableObject {
         if let text = event.content["body"] as? String {
             messageText = text
             
-            if event.content["msgtype"] as? String == "m.image" {
+            let msgtype = event.content["msgtype"] as? String
+            
+            if msgtype == "m.image" {
                 messageType = .image
                 if let url = event.content["url"] as? String {
                     mediaURL = url
                 }
-            } else if event.content["msgtype"] as? String == "m.file" {
+            } else if msgtype == "m.file" {
                 messageType = .file
                 if let url = event.content["url"] as? String {
                     mediaURL = url
@@ -2551,14 +2677,35 @@ class MatrixService: ObservableObject {
                 if let info = event.content["info"] as? [String: Any] {
                     fileName = event.content["filename"] as? String ?? "Файл"
                     fileSize = info["size"] as? Int
+                    
+                    // Проверяем, является ли файл голосовым сообщением
+                    if let mimetype = info["mimetype"] as? String, mimetype == "audio/mp4" ||
+                       fileName?.hasSuffix(".m4a") == true || fileName?.hasSuffix(".mp4") == true {
+                        messageType = .voice
+                        // Получаем длительность из информации о файле
+                        if let durationMs = info["duration"] as? Int {
+                            duration = TimeInterval(durationMs) / 1000.0 // конвертируем мс в секунды
+                        } else if let durationSeconds = info["duration"] as? TimeInterval {
+                            duration = durationSeconds
+                        }
+                        print("DEBUG: Voice message duration from event: \(duration ?? 0) seconds")
+                    }
                 }
-            } else if event.content["msgtype"] as? String == "m.audio" {
+            } else if msgtype == "m.audio" {
                 messageType = .voice
                 if let url = event.content["url"] as? String {
                     mediaURL = url
                 }
                 if let info = event.content["info"] as? [String: Any] {
-                    duration = info["duration"] as? TimeInterval
+                    // Получаем длительность из информации о аудио
+                    if let durationMs = info["duration"] as? Int {
+                        duration = TimeInterval(durationMs) / 1000.0 // конвертируем мс в секунды
+                    } else if let durationSeconds = info["duration"] as? TimeInterval {
+                        duration = durationSeconds
+                    }
+                    fileName = event.content["filename"] as? String ?? "Голосовое сообщение"
+                    fileSize = info["size"] as? Int
+                    print("DEBUG: Audio message duration from event: \(duration ?? 0) seconds")
                 }
             }
         } else {
@@ -2639,9 +2786,18 @@ class MatrixService: ObservableObject {
         do {
             try audioData.write(to: tempURL)
             
-            // Используем sendFile для голосовых сообщений
+            // Получаем длительность аудио
+            var audioDuration: TimeInterval = 0
+            if let player = try? AVAudioPlayer(data: audioData) {
+                audioDuration = player.duration
+                print("DEBUG: Sending voice message with duration: \(audioDuration) seconds")
+            }
+            
+            // Отправляем как аудио файл с правильным MIME-типом
             var localEcho: MXEvent?
-            room.sendFile(localURL: tempURL, mimeType: "audio/mp4", localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+            room.sendFile(localURL: tempURL,
+                         mimeType: "audio/mp4",
+                         localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
                 DispatchQueue.main.async {
                     // Удаляем временный файл
                     try? FileManager.default.removeItem(at: tempURL)
@@ -2661,8 +2817,7 @@ class MatrixService: ObservableObject {
     
     // MARK: - Media Download
     func downloadMedia(for message: Message, completion: @escaping (Data?) -> Void) {
-        guard let mediaURL = message.mediaURL,
-              let mxSession = mxSession else {
+        guard let mediaURL = message.mediaURL else {
             completion(nil)
             return
         }
@@ -2674,7 +2829,7 @@ class MatrixService: ObservableObject {
         }
         
         // Используем MXMediaManager для загрузки
-        mxSession.mediaManager.downloadMedia(
+        mxSession?.mediaManager.downloadMedia(
             fromMatrixContentURI: mediaURL,
             withType: nil,
             inFolder: nil,
