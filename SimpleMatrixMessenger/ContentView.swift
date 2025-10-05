@@ -29,6 +29,19 @@ struct K34ButtonStyle: ButtonStyle {
     }
 }
 
+struct K34DangerButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color.red)
+            .cornerRadius(25)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
 struct K34TextFieldStyle: TextFieldStyle {
     func _body(configuration: TextField<Self._Label>) -> some View {
         configuration
@@ -218,6 +231,8 @@ struct ContentView: View {
 struct ChatListView: View {
     @ObservedObject var matrixService: MatrixService
     @State private var selectedRoomId: String?
+    @State private var showingLeaveAlert = false
+    @State private var roomToLeave: MXRoom?
     
     var activeRooms: [MXRoom] {
         matrixService.rooms.filter { room in
@@ -314,6 +329,18 @@ struct ChatListView: View {
                 }
             }
         }
+        .alert("Покинуть чат", isPresented: $showingLeaveAlert) {
+            Button("Отмена", role: .cancel) { }
+            Button("Покинуть", role: .destructive) {
+                if let room = roomToLeave {
+                    leaveRoom(room)
+                }
+            }
+        } message: {
+            if let room = roomToLeave {
+                Text("Вы уверены, что хотите покинуть чат \"\(matrixService.getDisplayName(for: room))\"?")
+            }
+        }
     }
     
     private func chatRow(for room: MXRoom) -> some View {
@@ -323,8 +350,11 @@ struct ChatListView: View {
             }
             .opacity(0)
             
-            ChatRow(room: room, matrixService: matrixService)
-                .padding(.vertical, 8)
+            ChatRow(room: room, matrixService: matrixService, onLeaveRoom: {
+                roomToLeave = room
+                showingLeaveAlert = true
+            })
+            .padding(.vertical, 8)
         }
         .listRowBackground(K34Colors.cardBackground)
     }
@@ -354,15 +384,26 @@ struct ChatListView: View {
         .listRowBackground(Color.clear)
         .listRowInsets(EdgeInsets())
     }
+    
+    private func leaveRoom(_ room: MXRoom) {
+        matrixService.leaveRoom(roomId: room.roomId) { success in
+            if success {
+                // Комната автоматически удалится из списка благодаря обновлению rooms
+                matrixService.loadRooms()
+            }
+        }
+    }
 }
 
 // MARK: - Chat Row
 struct ChatRow: View {
     let room: MXRoom
     @ObservedObject var matrixService: MatrixService
+    var onLeaveRoom: (() -> Void)? = nil
     @State private var displayName: String = ""
     @State private var lastMessageText: String = "Пока нет сообщений"
     @State private var roomStatus: RoomStatus?
+    @State private var showingContextMenu = false
     
     var body: some View {
         HStack(spacing: 15) {
@@ -432,6 +473,21 @@ struct ChatRow: View {
         }
         .onReceive(matrixService.objectWillChange) { _ in
             updateDisplayInfo()
+        }
+        .contextMenu {
+            if roomStatus?.isInvited != true && roomStatus?.isInvitationOutgoing != true {
+                Button(role: .destructive) {
+                    onLeaveRoom?()
+                } label: {
+                    Label("Покинуть чат", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+            }
+            
+            Button {
+                matrixService.loadRooms()
+            } label: {
+                Label("Обновить", systemImage: "arrow.clockwise")
+            }
         }
     }
     
@@ -600,6 +656,8 @@ struct ChatRoomView: View {
     @State private var messageText = ""
     @State private var showReactionPickerForMessage: String? = nil
     @State private var roomStatus: RoomStatus?
+    @State private var showingLeaveAlert = false
+    @Environment(\.presentationMode) var presentationMode
     
     var roomMessages: [Message] {
         matrixService.messages
@@ -627,6 +685,28 @@ struct ChatRoomView: View {
         }
         .navigationTitle(matrixService.getDisplayName(for: room))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    if !isInvited {
+                        Button(role: .destructive) {
+                            showingLeaveAlert = true
+                        } label: {
+                            Label("Покинуть чат", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    }
+                    
+                    Button {
+                        matrixService.loadRooms()
+                    } label: {
+                        Label("Обновить", systemImage: "arrow.clockwise")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundColor(K34Colors.primaryRed)
+                }
+            }
+        }
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
             updateRoomStatus()
@@ -640,6 +720,14 @@ struct ChatRoomView: View {
                 matrixService: matrixService,
                 room: room
             )
+        }
+        .alert("Покинуть чат", isPresented: $showingLeaveAlert) {
+            Button("Отмена", role: .cancel) { }
+            Button("Покинуть", role: .destructive) {
+                leaveRoom()
+            }
+        } message: {
+            Text("Вы уверены, что хотите покинуть этот чат?")
         }
     }
     
@@ -792,7 +880,15 @@ struct ChatRoomView: View {
     private func rejectInvitation() {
         matrixService.rejectInvitation(roomId: room.roomId) { success in
             if success {
-                // Вернется в список чатов
+                presentationMode.wrappedValue.dismiss()
+            }
+        }
+    }
+    
+    private func leaveRoom() {
+        matrixService.leaveRoom(roomId: room.roomId) { success in
+            if success {
+                presentationMode.wrappedValue.dismiss()
             }
         }
     }
@@ -1250,6 +1346,38 @@ class MatrixService: ObservableObject {
         return roomStatuses[room.roomId]
     }
     
+    // MARK: - Room Leaving
+    func leaveRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
+        guard let room = mxSession?.room(withRoomId: roomId) else {
+            completion?(false)
+            return
+        }
+        
+        room.leave { [weak self] response in
+            DispatchQueue.main.async {
+                switch response {
+                case .success:
+                    // Удаляем комнату из списка
+                    self?.rooms.removeAll { $0.roomId == roomId }
+                    // Удаляем сообщения этой комнаты
+                    self?.messages.removeAll { $0.roomId == roomId }
+                    // Удаляем статус комнаты
+                    self?.roomStatuses.removeValue(forKey: roomId)
+                    // Удаляем listener
+                    if let listener = self?.roomListeners[roomId] {
+                        room.removeListener(listener)
+                        self?.roomListeners.removeValue(forKey: roomId)
+                    }
+                    self?.error = nil
+                    completion?(true)
+                case .failure(let error):
+                    self?.error = "Ошибка при выходе из чата: \(error.localizedDescription)"
+                    completion?(false)
+                }
+            }
+        }
+    }
+    
     // MARK: - Invitation Handling
     func acceptInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
         guard let room = mxSession?.room(withRoomId: roomId) else {
@@ -1273,24 +1401,7 @@ class MatrixService: ObservableObject {
     }
     
     func rejectInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            completion(false)
-            return
-        }
-        
-        room.leave { [weak self] response in
-            DispatchQueue.main.async {
-                switch response {
-                case .success:
-                    self?.loadRooms()
-                    self?.updateRoomStatuses()
-                    completion(true)
-                case .failure(let error):
-                    self?.error = "Ошибка отклонения приглашения: \(error.localizedDescription)"
-                    completion(false)
-                }
-            }
-        }
+        leaveRoom(roomId: roomId, completion: completion)
     }
     
     private func setupAllRoomListeners() {
