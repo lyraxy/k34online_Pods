@@ -1,6 +1,57 @@
 import SwiftUI
 import MatrixSDK
 
+// MARK: - Color Theme
+struct K34Colors {
+    static let primaryRed = Color(red: 0.8, green: 0.1, blue: 0.1)
+    static let darkRed = Color(red: 0.6, green: 0.05, blue: 0.05)
+    static let lightRed = Color(red: 1.0, green: 0.3, blue: 0.3)
+    static let darkGray = Color(red: 0.1, green: 0.1, blue: 0.1)
+    static let mediumGray = Color(red: 0.2, green: 0.2, blue: 0.2)
+    static let lightGray = Color(red: 0.3, green: 0.3, blue: 0.3)
+    static let textPrimary = Color.white
+    static let textSecondary = Color(red: 0.8, green: 0.8, blue: 0.8)
+    static let background = Color.black
+    static let cardBackground = Color(red: 0.15, green: 0.15, blue: 0.15)
+}
+
+// MARK: - Custom Styles
+struct K34ButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(K34Colors.primaryRed)
+            .cornerRadius(25)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+struct K34TextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .padding(15)
+            .background(K34Colors.cardBackground)
+            .cornerRadius(12)
+            .foregroundColor(K34Colors.textPrimary)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(K34Colors.lightGray, lineWidth: 1)
+            )
+    }
+}
+
+struct K34TabViewStyle: View {
+    var body: some View {
+        Rectangle()
+            .fill(K34Colors.darkGray)
+            .edgesIgnoringSafeArea(.bottom)
+    }
+}
+
+// MARK: - Main Content View
 struct ContentView: View {
     @StateObject private var matrixService = MatrixService()
     @State private var username = ""
@@ -10,75 +61,136 @@ struct ContentView: View {
     
     var body: some View {
         NavigationView {
-            if isLoggedIn {
-                mainView
-            } else {
-                loginView
+            ZStack {
+                K34Colors.background.ignoresSafeArea()
+                
+                if isLoggedIn {
+                    mainView
+                } else {
+                    loginView
+                }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
+        .preferredColorScheme(.dark)
         .onChange(of: matrixService.isLoggedIn) { newValue in
             isLoggedIn = newValue
         }
     }
     
     var mainView: some View {
-        TabView(selection: $selectedTab) {
-            ChatListView(matrixService: matrixService)
-                .tabItem {
-                    Image(systemName: "message.fill")
-                    Text("Чаты")
-                }
-                .tag(0)
+        ZStack {
+            K34Colors.background.ignoresSafeArea()
             
-            NewChatView(matrixService: matrixService)
-                .tabItem {
-                    Image(systemName: "plus.message.fill")
-                    Text("Новый чат")
-                }
-                .tag(1)
-            
-            ProfileView(matrixService: matrixService)
-                .tabItem {
-                    Image(systemName: "person.fill")
-                    Text("Профиль")
-                }
-                .tag(2)
+            TabView(selection: $selectedTab) {
+                ChatListView(matrixService: matrixService)
+                    .tabItem {
+                        Image(systemName: "message.fill")
+                            .foregroundColor(K34Colors.primaryRed)
+                        Text("Чаты")
+                            .foregroundColor(K34Colors.textPrimary)
+                    }
+                    .tag(0)
+                
+                NewChatView(matrixService: matrixService)
+                    .tabItem {
+                        Image(systemName: "plus.message.fill")
+                            .foregroundColor(K34Colors.primaryRed)
+                        Text("Новый чат")
+                            .foregroundColor(K34Colors.textPrimary)
+                    }
+                    .tag(1)
+                
+                ProfileView(matrixService: matrixService)
+                    .tabItem {
+                        Image(systemName: "person.fill")
+                            .foregroundColor(K34Colors.primaryRed)
+                        Text("Профиль")
+                            .foregroundColor(K34Colors.textPrimary)
+                    }
+                    .tag(2)
+            }
+            .accentColor(K34Colors.primaryRed)
+            .onAppear {
+                let appearance = UITabBarAppearance()
+                appearance.configureWithOpaqueBackground()
+                appearance.backgroundColor = UIColor(K34Colors.darkGray)
+                appearance.stackedLayoutAppearance.selected.iconColor = UIColor(K34Colors.primaryRed)
+                appearance.stackedLayoutAppearance.selected.titleTextAttributes = [.foregroundColor: UIColor(K34Colors.primaryRed)]
+                appearance.stackedLayoutAppearance.normal.iconColor = UIColor(K34Colors.lightGray)
+                appearance.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor(K34Colors.lightGray)]
+                
+                UITabBar.appearance().standardAppearance = appearance
+                UITabBar.appearance().scrollEdgeAppearance = appearance
+            }
         }
     }
     
     var loginView: some View {
-        VStack(spacing: 20) {
-            Text("K-34 Online")
-                .font(.title)
-                .padding(.bottom, 30)
+        VStack(spacing: 30) {
+            Spacer()
             
-            TextField("Имя пользователя", text: $username)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .autocapitalization(.none)
-                .padding(.horizontal)
-            
-            SecureField("Пароль", text: $password)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .padding(.horizontal)
-            
-            Button("Войти") {
-                matrixService.login(username: username, password: password)
-            }
-            .padding()
-            .background(Color.blue)
-            .foregroundColor(.white)
-            .cornerRadius(8)
-            
-            if matrixService.isLoading {
-                ProgressView()
+            // Logo and Title
+            VStack(spacing: 20) {
+                Image("login") // Замените "your-image-name" на имя вашего файла
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 100, height: 100)
+                    .shadow(color: K34Colors.primaryRed.opacity(0.5), radius: 10)
+                
+                Text("K-34 Online")
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundColor(K34Colors.textPrimary)
+                
+                Text("Общайся безопасно")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(K34Colors.textSecondary)
             }
             
-            if let error = matrixService.error {
-                Text(error)
-                    .foregroundColor(.red)
-                    .padding()
+            Spacer()
+            
+            // Login Form
+            VStack(spacing: 20) {
+                TextField("Имя пользователя", text: $username)
+                    .textFieldStyle(K34TextFieldStyle())
+                    .autocapitalization(.none)
+                    .padding(.horizontal)
+                
+                SecureField("Пароль", text: $password)
+                    .textFieldStyle(K34TextFieldStyle())
+                    .padding(.horizontal)
+                
+                Button("Войти") {
+                    matrixService.login(username: username, password: password)
+                }
+                .buttonStyle(K34ButtonStyle())
+                .padding(.top, 10)
+                
+                if matrixService.isLoading {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                        .scaleEffect(1.2)
+                }
+                
+                if let error = matrixService.error {
+                    Text(error)
+                        .foregroundColor(K34Colors.lightRed)
+                        .padding()
+                        .background(K34Colors.darkRed.opacity(0.3))
+                        .cornerRadius(8)
+                        .padding(.horizontal)
+                }
             }
+            
+            Spacer()
+            
+            // Footer
+            Text("v0.9 alpha-build • Безопасные коммуникации")
+                .font(.caption)
+                .foregroundColor(K34Colors.lightGray)
+                .padding(.bottom, 20)
         }
+        .background(K34Colors.background.ignoresSafeArea())
     }
 }
 
@@ -88,26 +200,58 @@ struct ChatListView: View {
     @State private var selectedRoomId: String?
     
     var body: some View {
-        NavigationView {
-            List {
-                if matrixService.rooms.isEmpty {
-                    Text("Пока нет чатов. Начать новый чат!")
-                        .foregroundColor(.gray)
-                        .italic()
-                } else {
-                    ForEach(matrixService.rooms, id: \.roomId) { room in
-                        NavigationLink(destination: ChatRoomView(matrixService: matrixService, room: room), tag: room.roomId, selection: $selectedRoomId) {
-                            ChatRow(room: room, matrixService: matrixService)
+        ZStack {
+            K34Colors.background.ignoresSafeArea()
+            
+            NavigationView {
+                ZStack {
+                    K34Colors.background.ignoresSafeArea()
+                    
+                    List {
+                        if matrixService.rooms.isEmpty {
+                            VStack(spacing: 20) {
+                                Image(systemName: "message")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(K34Colors.lightGray)
+                                Text("Пока нет чатов")
+                                    .font(.title2)
+                                    .foregroundColor(K34Colors.textPrimary)
+                                Text("Начните новый чат!")
+                                    .font(.body)
+                                    .foregroundColor(K34Colors.textSecondary)
+                            }
+                            .frame(height: 300)
+                            .listRowBackground(K34Colors.cardBackground).multilineTextAlignment(.center)
+                        } else {
+                            ForEach(matrixService.rooms, id: \.roomId) { room in
+                                ZStack {
+                                    NavigationLink(destination: ChatRoomView(matrixService: matrixService, room: room), tag: room.roomId, selection: $selectedRoomId) {
+                                        EmptyView()
+                                    }
+                                    .opacity(0)
+                                    
+                                    ChatRow(room: room, matrixService: matrixService)
+                                        .padding(.vertical, 8)
+                                }
+                                .listRowBackground(K34Colors.cardBackground)
+                            }
+                        }
+                    }
+                    .listStyle(PlainListStyle())
+                    .background(K34Colors.background)
+                }
+                .navigationTitle("Чаты")
+                .navigationBarTitleDisplayMode(.large)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            matrixService.loadRooms()
+                        }) {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundColor(K34Colors.primaryRed)
                         }
                     }
                 }
-            }
-            .navigationTitle("Чаты")
-            .refreshable {
-                matrixService.loadRooms()
-            }
-            .onAppear {
-                matrixService.loadRooms()
             }
         }
     }
@@ -120,22 +264,40 @@ struct ChatRow: View {
     @State private var lastMessageText: String = "Пока нет сообщений"
     
     var body: some View {
-        HStack {
-            VStack(alignment: .leading) {
+        HStack(spacing: 15) {
+            // Avatar
+            ZStack {
+                Circle()
+                    .fill(K34Colors.primaryRed)
+                    .frame(width: 50, height: 50)
+                
+                Text(displayName.prefix(1).uppercased())
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            
+            // Chat Info
+            VStack(alignment: .leading, spacing: 4) {
                 Text(displayName)
-                    .font(.headline)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(K34Colors.textPrimary)
+                    .lineLimit(1)
+                
                 Text(lastMessageText)
-                    .font(.subheadline)
-                    .foregroundColor(.gray)
+                    .font(.system(size: 14))
+                    .foregroundColor(K34Colors.textSecondary)
                     .lineLimit(1)
             }
+            
             Spacer()
             
+            // Unread Count
             if room.summary?.localUnreadEventCount ?? 0 > 0 {
                 Text("\(room.summary?.localUnreadEventCount ?? 0)")
-                    .padding(8)
-                    .background(Color.blue)
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.white)
+                    .padding(8)
+                    .background(K34Colors.primaryRed)
                     .clipShape(Circle())
                     .font(.caption)
             }
@@ -182,41 +344,69 @@ struct NewChatView: View {
     @State private var isCreatingRoom = false
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                Text("Начать новый чат")
-                    .font(.title2)
-                    .padding()
-                
-                TextField("Введите имя пользователя (например, ivanov)", text: $userId)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .autocapitalization(.none)
-                    .padding()
-                
-                Button(action: createDirectChat) {
-                    if isCreatingRoom {
-                        ProgressView()
-                    } else {
-                        Text("Начать чат")
-                            .frame(maxWidth: .infinity)
+        ZStack {
+            K34Colors.background.ignoresSafeArea()
+            
+            NavigationView {
+                VStack(spacing: 30) {
+                    // Header
+                    VStack(spacing: 15) {
+                        Image(systemName: "plus.bubble.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(K34Colors.primaryRed)
+                        
+                        Text("Начать новый чат")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(K34Colors.textPrimary)
+                        
+                        Text("Введите имя пользователя для начала общения")
+                            .font(.body)
+                            .foregroundColor(K34Colors.textSecondary)
+                            .multilineTextAlignment(.center)
                     }
+                    .padding(.top, 40)
+                    
+                    // Input Field
+                    VStack(spacing: 20) {
+                        TextField("Введите имя пользователя (например, ivanov)", text: $userId)
+                            .textFieldStyle(K34TextFieldStyle())
+                            .autocapitalization(.none)
+                            .padding(.horizontal)
+                        
+                        Button(action: createDirectChat) {
+                            if isCreatingRoom {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            } else {
+                                HStack {
+                                    Image(systemName: "message.fill")
+                                    Text("Начать чат")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .buttonStyle(K34ButtonStyle())
+                        .padding(.horizontal)
+                        .disabled(userId.isEmpty || isCreatingRoom)
+                    }
+                    
+                    if let error = matrixService.error {
+                        Text(error)
+                            .foregroundColor(K34Colors.lightRed)
+                            .padding()
+                            .background(K34Colors.darkRed.opacity(0.3))
+                            .cornerRadius(8)
+                            .padding(.horizontal)
+                    }
+                    
+                    Spacer()
                 }
-                .padding()
-                .background(Color.blue)
-                .foregroundColor(.white)
-                .cornerRadius(8)
-                .padding(.horizontal)
-                .disabled(userId.isEmpty || isCreatingRoom)
-                
-                if let error = matrixService.error {
-                    Text(error)
-                        .foregroundColor(.red)
-                        .padding()
-                }
-                
-                Spacer()
+                .navigationTitle("Новый чат")
+                .navigationBarTitleDisplayMode(.large)
+                .background(K34Colors.background.ignoresSafeArea())
             }
-            .navigationTitle("Новый чат")
         }
     }
     
@@ -251,77 +441,92 @@ struct ChatRoomView: View {
     }
     
     var body: some View {
-        VStack {
-            if isLoading {
-                HStack {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    Text("Загрузка сообщений...")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-                .padding()
-            }
+        ZStack {
+            K34Colors.background.ignoresSafeArea()
             
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack {
-                        if !isLoading && roomMessages.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "message")
-                                    .font(.system(size: 40))
-                                    .foregroundColor(.gray)
-                                Text("Пока нет сообщений")
-                                    .font(.headline)
-                                    .foregroundColor(.gray)
-                                Text("Начните общение!")
-                                    .font(.subheadline)
-                                    .foregroundColor(.gray)
+            VStack(spacing: 0) {
+                if isLoading {
+                    HStack {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                            .scaleEffect(0.8)
+                        Text("Загрузка сообщений...")
+                            .font(.caption)
+                            .foregroundColor(K34Colors.textSecondary)
+                    }
+                    .padding()
+                    .background(K34Colors.cardBackground)
+                }
+                
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack {
+                            if !isLoading && roomMessages.isEmpty {
+                                VStack(spacing: 20) {
+                                    Image(systemName: "message")
+                                        .font(.system(size: 50))
+                                        .foregroundColor(K34Colors.lightGray)
+                                    Text("Пока нет сообщений")
+                                        .font(.title2)
+                                        .foregroundColor(K34Colors.textPrimary)
+                                    Text("Начните общение!")
+                                        .font(.body)
+                                        .foregroundColor(K34Colors.textSecondary)
+                                }
+                                .frame(height: 300)
+                                .padding(40)
+                            } else {
+                                ForEach(roomMessages) { message in
+                                    MessageBubble(
+                                        message: message,
+                                        matrixService: matrixService,
+                                        room: room,
+                                        showReactionPickerForMessage: $showReactionPickerForMessage
+                                    )
+                                    .id(message.id)
+                                }
                             }
-                            .padding(40)
-                        } else {
-                            ForEach(roomMessages) { message in
-                                MessageBubble(
-                                    message: message,
-                                    matrixService: matrixService,
-                                    room: room,
-                                    showReactionPickerForMessage: $showReactionPickerForMessage
-                                )
-                                .id(message.id)
+                        }
+                        .padding()
+                    }
+                    .onChange(of: roomMessages.count) { _ in
+                        if let lastMessage = roomMessages.last {
+                            withAnimation {
+                                proxy.scrollTo(lastMessage.id, anchor: .bottom)
                             }
                         }
                     }
-                    .padding()
-                }
-                .onChange(of: roomMessages.count) { _ in
-                    if let lastMessage = roomMessages.last {
-                        withAnimation {
+                    .onAppear {
+                        if let lastMessage = roomMessages.last {
                             proxy.scrollTo(lastMessage.id, anchor: .bottom)
                         }
                     }
                 }
-                .onAppear {
-                    if let lastMessage = roomMessages.last {
-                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                    }
-                }
-            }
-            
-            HStack {
-                TextField("Напишите сообщение...", text: $messageText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .onSubmit {
-                        sendMessage()
-                    }
                 
-                Button("Отправить") {
-                    sendMessage()
+                // Message Input
+                HStack(spacing: 12) {
+                    TextField("Напишите сообщение...", text: $messageText)
+                        .textFieldStyle(K34TextFieldStyle())
+                        .onSubmit {
+                            sendMessage()
+                        }
+                    
+                    Button(action: sendMessage) {
+                        Image(systemName: "paperplane.fill")
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(K34Colors.primaryRed)
+                            .clipShape(Circle())
+                            .shadow(color: K34Colors.primaryRed.opacity(0.3), radius: 5)
+                    }
+                    .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .padding()
+                .background(K34Colors.cardBackground)
             }
-            .padding()
         }
         .navigationTitle(matrixService.getDisplayName(for: room))
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
         }
@@ -360,14 +565,18 @@ struct MessageBubble: View {
                 VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
                     Text(message.sender.replacingOccurrences(of: ":k34.online", with: "", options: .literal, range: nil))
                         .font(.caption)
-                        .foregroundColor(.gray)
+                        .foregroundColor(K34Colors.textSecondary)
                     
                     Text(message.text)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(message.isOutgoing ? Color.blue : Color.gray.opacity(0.2))
-                        .foregroundColor(message.isOutgoing ? .white : .primary)
-                        .cornerRadius(12)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(message.isOutgoing ? K34Colors.primaryRed : K34Colors.cardBackground)
+                        .foregroundColor(message.isOutgoing ? .white : K34Colors.textPrimary)
+                        .cornerRadius(18)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18)
+                                .stroke(message.isOutgoing ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 1)
+                        )
                         .contextMenu {
                             Button {
                                 showReactionPickerForMessage = message.id
@@ -392,7 +601,7 @@ struct MessageBubble: View {
                     
                     Text(formatTimestamp(message.timestamp))
                         .font(.caption2)
-                        .foregroundColor(.gray)
+                        .foregroundColor(K34Colors.lightGray)
                 }
                 
                 if !message.isOutgoing {
@@ -403,7 +612,6 @@ struct MessageBubble: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
         .onTapGesture(count: 2) {
-            // Двойное нажатие для быстрой реакции "👍"
             handleQuickReaction()
         }
         .onLongPressGesture {
@@ -419,16 +627,13 @@ struct MessageBubble: View {
     
     private func handleReactionTap(_ reaction: MessageReaction) {
         if reaction.didReact {
-            // Убираем реакцию, если пользователь уже поставил её
             matrixService.removeReaction(reaction.emoji, from: message.id, in: room.roomId)
         } else {
-            // Добавляем реакцию
             matrixService.addReaction(reaction.emoji, to: message.id, in: room.roomId)
         }
     }
     
     private func handleQuickReaction() {
-        // Проверяем, есть ли уже реакция "👍" от текущего пользователя
         if let existingReaction = message.reactions.first(where: { $0.emoji == "👍" && $0.didReact }) {
             matrixService.removeReaction("👍", from: message.id, in: room.roomId)
         } else {
@@ -449,14 +654,14 @@ struct ReactionsView: View {
                     Text(reaction.emoji)
                     Text("\(reaction.count)")
                         .font(.system(size: 10))
-                        .foregroundColor(.gray)
+                        .foregroundColor(K34Colors.textSecondary)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(reaction.didReact ? Color.blue.opacity(0.2) : Color.gray.opacity(0.1))
+                .background(reaction.didReact ? K34Colors.primaryRed.opacity(0.3) : K34Colors.cardBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(reaction.didReact ? Color.blue : Color.clear, lineWidth: 1)
+                        .stroke(reaction.didReact ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 1)
                 )
                 .cornerRadius(12)
                 .onTapGesture {
@@ -485,81 +690,90 @@ struct ReactionPickerView: View {
     
     let commonReactions = ["👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉"]
     
-    // Находим сообщение для которого показываем пикер
     private var message: Message? {
         matrixService.messages.first { $0.id == messageId }
     }
     
     var body: some View {
         NavigationView {
-            VStack {
-                // Показываем текущие реакции сообщения
-                if let message = message, !message.reactions.isEmpty {
-                    VStack(alignment: .leading) {
-                        Text("Текущие реакции:")
-                            .font(.headline)
-                            .padding(.horizontal)
-                        
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack {
-                                ForEach(message.reactions) { reaction in
-                                    VStack {
-                                        HStack(spacing: 4) {
-                                            Text(reaction.emoji)
-                                                .font(.title2)
-                                            Text("\(reaction.count)")
-                                                .font(.caption)
-                                        }
-                                        .padding(8)
-                                        .background(reaction.didReact ? Color.blue.opacity(0.3) : Color.gray.opacity(0.2))
-                                        .cornerRadius(8)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(reaction.didReact ? Color.blue : Color.clear, lineWidth: 2)
-                                        )
-                                        .onTapGesture {
-                                            if reaction.didReact {
-                                                matrixService.removeReaction(reaction.emoji, from: messageId, in: room.roomId)
-                                            } else {
-                                                matrixService.addReaction(reaction.emoji, to: messageId, in: room.roomId)
+            ZStack {
+                K34Colors.background.ignoresSafeArea()
+                
+                VStack {
+                    if let message = message, !message.reactions.isEmpty {
+                        VStack(alignment: .leading) {
+                            Text("Текущие реакции:")
+                                .font(.headline)
+                                .foregroundColor(K34Colors.textPrimary)
+                                .padding(.horizontal)
+                            
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack {
+                                    ForEach(message.reactions) { reaction in
+                                        VStack {
+                                            HStack(spacing: 4) {
+                                                Text(reaction.emoji)
+                                                    .font(.title2)
+                                                Text("\(reaction.count)")
+                                                    .font(.caption)
+                                                    .foregroundColor(K34Colors.textSecondary)
                                             }
-                                            presentationMode.wrappedValue.dismiss()
-                                        }
-                                        
-                                        if reaction.didReact {
-                                            Text("Убрать")
-                                                .font(.caption2)
-                                                .foregroundColor(.red)
+                                            .padding(8)
+                                            .background(reaction.didReact ? K34Colors.primaryRed.opacity(0.3) : K34Colors.cardBackground)
+                                            .cornerRadius(8)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .stroke(reaction.didReact ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 2)
+                                            )
+                                            .onTapGesture {
+                                                if reaction.didReact {
+                                                    matrixService.removeReaction(reaction.emoji, from: messageId, in: room.roomId)
+                                                } else {
+                                                    matrixService.addReaction(reaction.emoji, to: messageId, in: room.roomId)
+                                                }
+                                                presentationMode.wrappedValue.dismiss()
+                                            }
+                                            
+                                            if reaction.didReact {
+                                                Text("Убрать")
+                                                    .font(.caption2)
+                                                    .foregroundColor(K34Colors.lightRed)
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            .padding(.horizontal)
-                        }
-                    }
-                    .padding(.vertical)
-                }
-                
-                Text("Добавить реакцию:")
-                    .font(.headline)
-                    .padding(.horizontal)
-                
-                ScrollView {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
-                        ForEach(commonReactions, id: \.self) { emoji in
-                            Button(action: {
-                                matrixService.addReaction(emoji, to: messageId, in: room.roomId)
-                                presentationMode.wrappedValue.dismiss()
-                            }) {
-                                Text(emoji)
-                                    .font(.system(size: 30))
-                                    .frame(width: 50, height: 50)
-                                    .background(Color.gray.opacity(0.1))
-                                    .cornerRadius(10)
+                                .padding(.horizontal)
                             }
                         }
+                        .padding(.vertical)
                     }
-                    .padding()
+                    
+                    Text("Добавить реакцию:")
+                        .font(.headline)
+                        .foregroundColor(K34Colors.textPrimary)
+                        .padding(.horizontal)
+                    
+                    ScrollView {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
+                            ForEach(commonReactions, id: \.self) { emoji in
+                                Button(action: {
+                                    matrixService.addReaction(emoji, to: messageId, in: room.roomId)
+                                    presentationMode.wrappedValue.dismiss()
+                                }) {
+                                    Text(emoji)
+                                        .font(.system(size: 30))
+                                        .frame(width: 50, height: 50)
+                                        .background(K34Colors.cardBackground)
+                                        .cornerRadius(10)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(K34Colors.lightGray, lineWidth: 1)
+                                        )
+                                }
+                            }
+                        }
+                        .padding()
+                    }
                 }
             }
             .navigationTitle("Реакции")
@@ -569,9 +783,11 @@ struct ReactionPickerView: View {
                     Button("Готово") {
                         presentationMode.wrappedValue.dismiss()
                     }
+                    .foregroundColor(K34Colors.primaryRed)
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -580,31 +796,68 @@ struct ProfileView: View {
     @ObservedObject var matrixService: MatrixService
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                Image(systemName: "person.circle.fill")
-                    .resizable()
-                    .frame(width: 100, height: 100)
-                    .foregroundColor(.blue)
-                    .padding()
-                
-                Text(matrixService.currentUserId ?? "Неизвестный пользователь")
-                    .font(.title2)
-                
-                Button("Выйти") {
-                    matrixService.logout()
+        ZStack {
+            K34Colors.background.ignoresSafeArea()
+            
+            NavigationView {
+                VStack(spacing: 30) {
+                    Spacer()
+                    
+                    VStack(spacing: 20) {
+                        ZStack {
+                            Circle()
+                                .fill(K34Colors.primaryRed)
+                                .frame(width: 120, height: 120)
+                                .shadow(color: K34Colors.primaryRed.opacity(0.5), radius: 10)
+                            
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 50, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                        
+                        VStack(spacing: 8) {
+                            Text(matrixService.currentUserId ?? "Неизвестный пользователь")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(K34Colors.textPrimary)
+                                .multilineTextAlignment(.center)
+                            
+                            Text("K-34 Online User")
+                                .font(.body)
+                                .foregroundColor(K34Colors.textSecondary)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Button("Выйти") {
+                        matrixService.logout()
+                    }
+                    .buttonStyle(K34ButtonStyle())
+                    .padding(.horizontal, 40)
+                    
+                    Spacer()
+                    
+                    VStack(spacing: 10) {
+                        Text("K-34 Online Messenger")
+                            .font(.caption)
+                            .foregroundColor(K34Colors.textSecondary)
+                        
+                        Text("Secure • Private • Reliable")
+                            .font(.caption2)
+                            .foregroundColor(K34Colors.lightGray)
+                    }
+                    .padding(.bottom, 20)
                 }
-                .padding()
-                .background(Color.red)
-                .foregroundColor(.white)
-                .cornerRadius(8)
-                
-                Spacer()
+                .navigationTitle("Профиль")
+                .navigationBarTitleDisplayMode(.large)
             }
-            .navigationTitle("Профиль")
         }
     }
 }
+
+// Остальной код MatrixService и моделей остается без изменений...
+// [MatrixService, Message, MessageReaction и все extensions остаются такими же как в предыдущей версии]
 
 // MARK: - Models and Services
 struct MessageReaction: Identifiable {
