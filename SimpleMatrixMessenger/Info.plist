@@ -15,5 +15,7 @@
 		<string>external-accessory</string>
 		<string>voip</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Приложению требуется доступ к микрофону для записи голосовых сообщений</string>
 </dict>
 </plist>

@@ -1,5 +1,6 @@
 import SwiftUI
 import MatrixSDK
+import AVFoundation
 
 // MARK: - Color Theme
 struct K34Colors {
@@ -73,6 +74,18 @@ struct Message: Identifiable {
     let roomId: String
     let isOutgoing: Bool
     var reactions: [MessageReaction]
+    let messageType: MessageType
+    let mediaURL: String?
+    let fileName: String?
+    let fileSize: Int?
+    let duration: TimeInterval?
+}
+
+enum MessageType {
+    case text
+    case image
+    case file
+    case voice
 }
 
 struct RoomStatus {
@@ -80,6 +93,245 @@ struct RoomStatus {
     let isInvited: Bool
     let isInvitationOutgoing: Bool
     let otherUserId: String?
+}
+
+// MARK: - Voice Message Recorder
+class VoiceMessageRecorder: NSObject, ObservableObject {
+    private var audioRecorder: AVAudioRecorder?
+    private var audioPlayer: AVAudioPlayer?
+    private var recordingSession: AVAudioSession?
+    
+    @Published var isRecording = false
+    @Published var isPlaying = false
+    @Published var recordingTime: TimeInterval = 0
+    @Published var currentPlaybackTime: TimeInterval = 0
+    @Published var recordingURL: URL?
+    @Published var showPermissionAlert = false
+    @Published var permissionError: String?
+    
+    private var timer: Timer?
+    
+    override init() {
+        super.init()
+        setupRecordingSession()
+    }
+    
+    private func setupRecordingSession() {
+        recordingSession = AVAudioSession.sharedInstance()
+    }
+    
+    func requestMicrophonePermission(completion: @escaping (Bool) -> Void) {
+        guard let recordingSession = recordingSession else {
+            completion(false)
+            return
+        }
+        
+        recordingSession.requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.setupAudioSession()
+                    completion(true)
+                } else {
+                    self?.showPermissionAlert = true
+                    self?.permissionError = "Для записи голосовых сообщений требуется доступ к микрофону. Пожалуйста, разрешите доступ в настройках устройства."
+                    completion(false)
+                }
+            }
+        }
+    }
+    
+    private func setupAudioSession() {
+        do {
+            try recordingSession?.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+            try recordingSession?.setActive(true)
+        } catch {
+            print("Failed to setup audio session: \(error)")
+            DispatchQueue.main.async {
+                self.permissionError = "Ошибка настройки аудиосессии: \(error.localizedDescription)"
+                self.showPermissionAlert = true
+            }
+        }
+    }
+    
+    func startRecording() {
+        requestMicrophonePermission { [weak self] granted in
+            guard let self = self, granted else { return }
+            
+            DispatchQueue.main.async {
+                self.startRecordingInternal()
+            }
+        }
+    }
+    
+    private func startRecordingInternal() {
+        let audioFilename = getDocumentsDirectory().appendingPathComponent("recording-\(Date().timeIntervalSince1970).m4a")
+        
+        let settings = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ] as [String : Any]
+        
+        do {
+            audioRecorder = try AVAudioRecorder(url: audioFilename, settings: settings)
+            audioRecorder?.delegate = self
+            audioRecorder?.isMeteringEnabled = true
+            audioRecorder?.prepareToRecord()
+            audioRecorder?.record()
+            
+            isRecording = true
+            recordingTime = 0
+            recordingURL = audioFilename
+            
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                self?.recordingTime += 0.1
+            }
+        } catch {
+            print("Could not start recording: \(error)")
+            DispatchQueue.main.async {
+                self.permissionError = "Ошибка начала записи: \(error.localizedDescription)"
+                self.showPermissionAlert = true
+            }
+        }
+    }
+    
+    func stopRecording() {
+        audioRecorder?.stop()
+        isRecording = false
+        timer?.invalidate()
+        timer = nil
+        
+        // Деактивируем аудиосессию после записи
+        do {
+            try recordingSession?.setActive(false)
+        } catch {
+            print("Error deactivating audio session: \(error)")
+        }
+    }
+    
+    func playRecording() {
+        guard let url = recordingURL else { return }
+        
+        do {
+            // Активируем аудиосессию для воспроизведения
+            try recordingSession?.setCategory(.playback, mode: .default)
+            try recordingSession?.setActive(true)
+            
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.delegate = self
+            audioPlayer?.play()
+            isPlaying = true
+            
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self = self, let player = self.audioPlayer else { return }
+                self.currentPlaybackTime = player.currentTime
+            }
+        } catch {
+            print("Could not play recording: \(error)")
+        }
+    }
+    
+    func stopPlayback() {
+        audioPlayer?.stop()
+        isPlaying = false
+        currentPlaybackTime = 0
+        timer?.invalidate()
+        timer = nil
+        
+        // Деактивируем аудиосессию после воспроизведения
+        do {
+            try recordingSession?.setActive(false)
+        } catch {
+            print("Error deactivating audio session: \(error)")
+        }
+    }
+    
+    func deleteRecording() {
+        stopRecording()
+        stopPlayback()
+        
+        if let url = recordingURL {
+            try? FileManager.default.removeItem(at: url)
+            recordingURL = nil
+        }
+        recordingTime = 0
+    }
+    
+    private func getDocumentsDirectory() -> URL {
+        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        return paths[0]
+    }
+    
+    func getRecordingData() -> Data? {
+        guard let url = recordingURL else { return nil }
+        return try? Data(contentsOf: url)
+    }
+}
+
+extension VoiceMessageRecorder: AVAudioRecorderDelegate, AVAudioPlayerDelegate {
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        isRecording = false
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        isPlaying = false
+        currentPlaybackTime = 0
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+// MARK: - Voice Message Player
+class VoiceMessagePlayer: NSObject, ObservableObject {
+    private var audioPlayer: AVAudioPlayer?
+    
+    @Published var isPlaying = false
+    @Published var currentPlaybackTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
+    
+    private var timer: Timer?
+    
+    func playAudio(from data: Data) {
+        do {
+            audioPlayer = try AVAudioPlayer(data: data)
+            audioPlayer?.delegate = self
+            audioPlayer?.play()
+            isPlaying = true
+            duration = audioPlayer?.duration ?? 0
+            
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self = self, let player = self.audioPlayer else { return }
+                self.currentPlaybackTime = player.currentTime
+            }
+        } catch {
+            print("Could not play audio: \(error)")
+        }
+    }
+    
+    func stopPlayback() {
+        audioPlayer?.stop()
+        isPlaying = false
+        currentPlaybackTime = 0
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    func seek(to time: TimeInterval) {
+        audioPlayer?.currentTime = time
+        currentPlaybackTime = time
+    }
+}
+
+extension VoiceMessagePlayer: AVAudioPlayerDelegate {
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        isPlaying = false
+        currentPlaybackTime = 0
+        timer?.invalidate()
+        timer = nil
+    }
 }
 
 // MARK: - Main Content View
@@ -741,6 +993,9 @@ struct ChatRoomView: View {
     @State private var showReactionPickerForMessage: String? = nil
     @State private var roomStatus: RoomStatus?
     @State private var showingLeaveAlert = false
+    @State private var showingFilePicker = false
+    @State private var showingVoiceRecorder = false
+    @StateObject private var voiceRecorder = VoiceMessageRecorder()
     @Environment(\.presentationMode) var presentationMode
     
     var roomMessages: [Message] {
@@ -810,6 +1065,22 @@ struct ChatRoomView: View {
                 matrixService: matrixService,
                 room: room
             )
+        }
+        .sheet(isPresented: $showingVoiceRecorder) {
+            VoiceMessageRecorderView(
+                isPresented: $showingVoiceRecorder,
+                voiceRecorder: voiceRecorder,
+                onSend: { audioData in
+                    matrixService.sendVoiceMessage(audioData, in: room.roomId)
+                }
+            )
+        }
+        .fileImporter(
+            isPresented: $showingFilePicker,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileSelection(result)
         }
         .alert("Покинуть чат", isPresented: $showingLeaveAlert) {
             Button("Отмена", role: .cancel) { }
@@ -882,27 +1153,48 @@ struct ChatRoomView: View {
             }
             
             // Message Input
-            HStack(spacing: 12) {
-                TextField("Напишите сообщение...", text: $messageText)
-                    .textFieldStyle(K34TextFieldStyle())
-                    .onSubmit {
-                        sendMessage()
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    // Attachment Button
+                    Menu {
+                        Button {
+                            showingFilePicker = true
+                        } label: {
+                            Label("Отправить файл", systemImage: "folder")
+                        }
+                        
+                        Button {
+                            showingVoiceRecorder = true
+                        } label: {
+                            Label("Голосовое сообщение", systemImage: "mic.fill")
+                        }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(K34Colors.primaryRed)
                     }
-                    .disableAutocorrection(true)
-                    .textInputAutocapitalization(.never)
-                
-                Button(action: sendMessage) {
-                    Image(systemName: "paperplane.fill")
-                        .foregroundColor(.white)
-                        .padding(12)
-                        .background(K34Colors.primaryRed)
-                        .clipShape(Circle())
-                        .shadow(color: K34Colors.primaryRed.opacity(0.3), radius: 5)
+                    
+                    TextField("Напишите сообщение...", text: $messageText)
+                        .textFieldStyle(K34TextFieldStyle())
+                        .onSubmit {
+                            sendMessage()
+                        }
+                        .disableAutocorrection(true)
+                        .textInputAutocapitalization(.never)
+                    
+                    Button(action: sendMessage) {
+                        Image(systemName: "paperplane.fill")
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(K34Colors.primaryRed)
+                            .clipShape(Circle())
+                            .shadow(color: K34Colors.primaryRed.opacity(0.3), radius: 5)
+                    }
+                    .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .padding()
+                .background(K34Colors.cardBackground)
             }
-            .padding()
-            .background(K34Colors.cardBackground)
         }
     }
     
@@ -993,6 +1285,173 @@ struct ChatRoomView: View {
         matrixService.sendMessage(trimmedText, in: room.roomId)
         messageText = ""
     }
+    
+    private func handleFileSelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            _ = url.startAccessingSecurityScopedResource()
+            defer { url.stopAccessingSecurityScopedResource() }
+            
+            matrixService.sendFile(url, in: room.roomId)
+        case .failure(let error):
+            print("File selection error: \(error)")
+        }
+    }
+}
+
+// MARK: - Voice Message Recorder View
+struct VoiceMessageRecorderView: View {
+    @Binding var isPresented: Bool
+    @ObservedObject var voiceRecorder: VoiceMessageRecorder
+    var onSend: (Data) -> Void
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                K34Colors.background.ignoresSafeArea()
+                
+                VStack(spacing: 30) {
+                    Spacer()
+                    
+                    VStack(spacing: 20) {
+                        Image(systemName: "mic.circle.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(K34Colors.primaryRed)
+                        
+                        Text(voiceRecorder.isRecording ? "Запись..." : "Голосовое сообщение")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(K34Colors.textPrimary)
+                        
+                        Text(formatTime(voiceRecorder.recordingTime))
+                            .font(.system(size: 24, weight: .medium, design: .monospaced))
+                            .foregroundColor(K34Colors.textSecondary)
+                        
+                        if let url = voiceRecorder.recordingURL, !voiceRecorder.isRecording {
+                            VoiceMessagePreview(
+                                voiceRecorder: voiceRecorder,
+                                recordingURL: url
+                            )
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 30) {
+                        if voiceRecorder.isRecording {
+                            Button("Остановить") {
+                                voiceRecorder.stopRecording()
+                            }
+                            .buttonStyle(K34ButtonStyle())
+                        } else {
+                            if voiceRecorder.recordingURL == nil {
+                                Button("Начать запись") {
+                                    voiceRecorder.startRecording()
+                                }
+                                .buttonStyle(K34ButtonStyle())
+                            } else {
+                                Button("Перезаписать") {
+                                    voiceRecorder.deleteRecording()
+                                    voiceRecorder.startRecording()
+                                }
+                                .foregroundColor(K34Colors.lightRed)
+                                
+                                Button("Отправить") {
+                                    if let audioData = voiceRecorder.getRecordingData() {
+                                        onSend(audioData)
+                                        isPresented = false
+                                        voiceRecorder.deleteRecording()
+                                    }
+                                }
+                                .buttonStyle(K34ButtonStyle())
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                }
+                .padding()
+            }
+            .navigationTitle("Запись голоса")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Отмена") {
+                        voiceRecorder.deleteRecording()
+                        isPresented = false
+                    }
+                    .foregroundColor(K34Colors.primaryRed)
+                }
+            }
+            .alert("Доступ к микрофону", isPresented: $voiceRecorder.showPermissionAlert) {
+                Button("OK", role: .cancel) { }
+                Button("Настройки") {
+                    // Открываем настройки для предоставления разрешения
+                    if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(settingsURL)
+                    }
+                }
+            } message: {
+                Text(voiceRecorder.permissionError ?? "Для записи голосовых сообщений требуется доступ к микрофону.")
+            }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear {
+            // Предварительно запрашиваем разрешение при открытии экрана
+            voiceRecorder.requestMicrophonePermission { _ in }
+        }
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+// MARK: - Voice Message Preview
+struct VoiceMessagePreview: View {
+    @ObservedObject var voiceRecorder: VoiceMessageRecorder
+    let recordingURL: URL
+    
+    var body: some View {
+        VStack(spacing: 15) {
+            HStack(spacing: 15) {
+                Button(action: {
+                    if voiceRecorder.isPlaying {
+                        voiceRecorder.stopPlayback()
+                    } else {
+                        voiceRecorder.playRecording()
+                    }
+                }) {
+                    Image(systemName: voiceRecorder.isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                        .font(.title)
+                        .foregroundColor(K34Colors.primaryRed)
+                }
+                
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Прослушать запись")
+                        .font(.headline)
+                        .foregroundColor(K34Colors.textPrimary)
+                    
+                    Text(formatTime(voiceRecorder.isPlaying ? voiceRecorder.currentPlaybackTime : voiceRecorder.recordingTime))
+                        .font(.caption)
+                        .foregroundColor(K34Colors.textSecondary)
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .background(K34Colors.cardBackground)
+            .cornerRadius(12)
+        }
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
 }
 
 // MARK: - Message Bubble with Reactions
@@ -1001,6 +1460,7 @@ struct MessageBubble: View {
     @ObservedObject var matrixService: MatrixService
     let room: MXRoom
     @Binding var showReactionPickerForMessage: String?
+    @StateObject private var voicePlayer = VoiceMessagePlayer()
     
     var body: some View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
@@ -1014,30 +1474,29 @@ struct MessageBubble: View {
                         .font(.caption)
                         .foregroundColor(K34Colors.textSecondary)
                     
-                    Text(message.text)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(message.isOutgoing ? K34Colors.primaryRed : K34Colors.cardBackground)
-                        .foregroundColor(message.isOutgoing ? .white : K34Colors.textPrimary)
-                        .cornerRadius(18)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 18)
-                                .stroke(message.isOutgoing ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 1)
+                    if message.messageType == .text {
+                        Text(message.text)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(message.isOutgoing ? K34Colors.primaryRed : K34Colors.cardBackground)
+                            .foregroundColor(message.isOutgoing ? .white : K34Colors.textPrimary)
+                            .cornerRadius(18)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(message.isOutgoing ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 1)
+                            )
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if message.messageType == .file {
+                        FileMessageView(message: message)
+                    } else if message.messageType == .voice {
+                        VoiceMessageView(
+                            message: message,
+                            matrixService: matrixService,
+                            voicePlayer: voicePlayer
                         )
-                        .fixedSize(horizontal: false, vertical: true)
-                        .contextMenu {
-                            Button {
-                                showReactionPickerForMessage = message.id
-                            } label: {
-                                Label("Добавить реакцию", systemImage: "face.smiling")
-                            }
-                            
-                            Button {
-                                UIPasteboard.general.string = message.text
-                            } label: {
-                                Label("Копировать", systemImage: "doc.on.doc")
-                            }
-                        }
+                    } else if message.messageType == .image {
+                        ImageMessageView(message: message)
+                    }
                     
                     // Отображение реакций
                     if !message.reactions.isEmpty {
@@ -1050,6 +1509,21 @@ struct MessageBubble: View {
                     Text(formatTimestamp(message.timestamp))
                         .font(.caption2)
                         .foregroundColor(K34Colors.lightGray)
+                }
+                .contextMenu {
+                    Button {
+                        showReactionPickerForMessage = message.id
+                    } label: {
+                        Label("Добавить реакцию", systemImage: "face.smiling")
+                    }
+                    
+                    if message.messageType == .text {
+                        Button {
+                            UIPasteboard.general.string = message.text
+                        } label: {
+                            Label("Копировать", systemImage: "doc.on.doc")
+                        }
+                    }
                 }
                 
                 if !message.isOutgoing {
@@ -1064,6 +1538,9 @@ struct MessageBubble: View {
         }
         .onLongPressGesture {
             showReactionPickerForMessage = message.id
+        }
+        .onDisappear {
+            voicePlayer.stopPlayback()
         }
     }
     
@@ -1092,6 +1569,229 @@ struct MessageBubble: View {
             matrixService.removeReaction("👍", from: message.id, in: room.roomId)
         } else {
             matrixService.addReaction("👍", to: message.id, in: room.roomId)
+        }
+    }
+}
+
+// MARK: - File Message View
+struct FileMessageView: View {
+    let message: Message
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "doc.fill")
+                .font(.title2)
+                .foregroundColor(K34Colors.primaryRed)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(message.fileName ?? "Файл")
+                    .font(.headline)
+                    .foregroundColor(K34Colors.textPrimary)
+                    .lineLimit(1)
+                
+                if let fileSize = message.fileSize {
+                    Text(formatFileSize(fileSize))
+                        .font(.caption)
+                        .foregroundColor(K34Colors.textSecondary)
+                }
+            }
+            
+            Spacer()
+            
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.title2)
+                .foregroundColor(K34Colors.primaryRed)
+        }
+        .padding(12)
+        .background(K34Colors.cardBackground)
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(K34Colors.lightGray, lineWidth: 1)
+        )
+    }
+    
+    private func formatFileSize(_ size: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(size))
+    }
+}
+
+// MARK: - Voice Message View
+struct VoiceMessageView: View {
+    let message: Message
+    @ObservedObject var matrixService: MatrixService
+    @ObservedObject var voicePlayer: VoiceMessagePlayer
+    @State private var audioData: Data?
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: {
+                if voicePlayer.isPlaying {
+                    voicePlayer.stopPlayback()
+                } else {
+                    if let data = audioData {
+                        voicePlayer.playAudio(from: data)
+                    } else {
+                        matrixService.downloadMedia(for: message) { data in
+                            if let data = data {
+                                audioData = data
+                                voicePlayer.playAudio(from: data)
+                            }
+                        }
+                    }
+                }
+            }) {
+                Image(systemName: voicePlayer.isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                    .font(.title2)
+                    .foregroundColor(K34Colors.primaryRed)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Голосовое сообщение")
+                    .font(.headline)
+                    .foregroundColor(K34Colors.textPrimary)
+                
+                if let duration = message.duration {
+                    Text(formatTime(voicePlayer.isPlaying ? voicePlayer.currentPlaybackTime : duration))
+                        .font(.caption)
+                        .foregroundColor(K34Colors.textSecondary)
+                }
+            }
+            
+            Spacer()
+            
+            if voicePlayer.isPlaying, voicePlayer.duration > 0 {
+                ProgressView(value: voicePlayer.currentPlaybackTime, total: voicePlayer.duration)
+                    .progressViewStyle(LinearProgressViewStyle(tint: K34Colors.primaryRed))
+                    .frame(width: 60)
+            }
+        }
+        .padding(12)
+        .background(K34Colors.cardBackground)
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(K34Colors.lightGray, lineWidth: 1)
+        )
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Image Message View
+struct ImageMessageView: View {
+    let message: Message
+    @State private var imageData: Data?
+    @State private var showingFullScreenImage = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let imageData = imageData, let uiImage = UIImage(data: imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 200)
+                    .cornerRadius(12)
+                    .onTapGesture {
+                        showingFullScreenImage = true
+                    }
+            } else {
+                HStack {
+                    Image(systemName: "photo")
+                        .font(.title2)
+                        .foregroundColor(K34Colors.primaryRed)
+                    Text("Изображение")
+                        .font(.headline)
+                        .foregroundColor(K34Colors.textPrimary)
+                }
+                .padding(12)
+                .background(K34Colors.cardBackground)
+                .cornerRadius(12)
+            }
+        }
+        .sheet(isPresented: $showingFullScreenImage) {
+            if let imageData = imageData, let uiImage = UIImage(data: imageData) {
+                FullScreenImageView(image: uiImage, isPresented: $showingFullScreenImage)
+            }
+        }
+    }
+}
+
+// MARK: - Full Screen Image View
+struct FullScreenImageView: View {
+    let image: UIImage
+    @Binding var isPresented: Bool
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .scaleEffect(scale)
+                .offset(offset)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            let delta = value / lastScale
+                            lastScale = value
+                            scale *= delta
+                        }
+                        .onEnded { _ in
+                            lastScale = 1.0
+                            scale = min(max(scale, 1.0), 4.0)
+                        }
+                )
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            offset = CGSize(
+                                width: lastOffset.width + value.translation.width,
+                                height: lastOffset.height + value.translation.height
+                            )
+                        }
+                        .onEnded { _ in
+                            lastOffset = offset
+                        }
+                )
+                .gesture(
+                    TapGesture(count: 2)
+                        .onEnded {
+                            withAnimation {
+                                if scale > 1.0 {
+                                    scale = 1.0
+                                    offset = .zero
+                                    lastOffset = .zero
+                                } else {
+                                    scale = 2.0
+                                }
+                            }
+                        }
+                )
+            
+            VStack {
+                HStack {
+                    Spacer()
+                    Button("Закрыть") {
+                        isPresented = false
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                }
+                Spacer()
+            }
         }
     }
 }
@@ -1333,6 +2033,7 @@ class MatrixService: ObservableObject {
     private var hasSetupRoomListeners = false
     private var reactionEvents: [String: [MXEvent]] = [:]
     private var backgroundRefreshTimer: Timer?
+    private var mediaCache: [String: Data] = [:]
 
     // MARK: - Login and Session Setup
     func login(username: String, password: String) {
@@ -1828,13 +2529,38 @@ class MatrixService: ObservableObject {
         }
         
         var messageText = ""
+        var messageType: MessageType = .text
+        var mediaURL: String? = nil
+        var fileName: String? = nil
+        var fileSize: Int? = nil
+        var duration: TimeInterval? = nil
         
         if let text = event.content["body"] as? String {
             messageText = text
-        } else if event.content["msgtype"] as? String == "m.image" {
-            messageText = "📷 Изображение"
-        } else if event.content["msgtype"] as? String == "m.file" {
-            messageText = "📎 Файл"
+            
+            if event.content["msgtype"] as? String == "m.image" {
+                messageType = .image
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+            } else if event.content["msgtype"] as? String == "m.file" {
+                messageType = .file
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+                if let info = event.content["info"] as? [String: Any] {
+                    fileName = event.content["filename"] as? String ?? "Файл"
+                    fileSize = info["size"] as? Int
+                }
+            } else if event.content["msgtype"] as? String == "m.audio" {
+                messageType = .voice
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+                if let info = event.content["info"] as? [String: Any] {
+                    duration = info["duration"] as? TimeInterval
+                }
+            }
         } else {
             return nil
         }
@@ -1857,7 +2583,118 @@ class MatrixService: ObservableObject {
             timestamp: timestamp,
             roomId: roomId,
             isOutgoing: event.sender == self.currentUserId,
-            reactions: reactions
+            reactions: reactions,
+            messageType: messageType,
+            mediaURL: mediaURL,
+            fileName: fileName,
+            fileSize: fileSize,
+            duration: duration
+        )
+    }
+    
+    // MARK: - File and Voice Message Sending
+    func sendFile(_ fileURL: URL, in roomId: String) {
+        guard let room = mxSession?.room(withRoomId: roomId) else {
+            error = "Комната не найдена"
+            return
+        }
+        
+        do {
+            let fileData = try Data(contentsOf: fileURL)
+            let fileName = fileURL.lastPathComponent
+            let mimeType = "application/octet-stream"
+            
+            // Создаем временный файл для отправки
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
+            try fileData.write(to: tempURL)
+            
+            // Используем упрощенный вызов sendFile
+            var localEcho: MXEvent?
+            room.sendFile(localURL: tempURL, mimeType: mimeType, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                DispatchQueue.main.async {
+                    // Удаляем временный файл
+                    try? FileManager.default.removeItem(at: tempURL)
+                    
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        self?.error = "Ошибка отправки файла: \(error.localizedDescription)"
+                    }
+                }
+            }
+        } catch {
+            self.error = "Ошибка чтения файла: \(error.localizedDescription)"
+        }
+    }
+
+    func sendVoiceMessage(_ audioData: Data, in roomId: String) {
+        guard let room = mxSession?.room(withRoomId: roomId) else {
+            error = "Комната не найдена"
+            return
+        }
+        
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("voice-\(Date().timeIntervalSince1970).m4a")
+        
+        do {
+            try audioData.write(to: tempURL)
+            
+            // Используем sendFile для голосовых сообщений
+            var localEcho: MXEvent?
+            room.sendFile(localURL: tempURL, mimeType: "audio/mp4", localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                DispatchQueue.main.async {
+                    // Удаляем временный файл
+                    try? FileManager.default.removeItem(at: tempURL)
+                    
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        self?.error = "Ошибка отправки голосового сообщения: \(error.localizedDescription)"
+                    }
+                }
+            }
+        } catch {
+            self.error = "Ошибка сохранения аудио: \(error.localizedDescription)"
+        }
+    }
+    
+    // MARK: - Media Download
+    func downloadMedia(for message: Message, completion: @escaping (Data?) -> Void) {
+        guard let mediaURL = message.mediaURL,
+              let mxSession = mxSession else {
+            completion(nil)
+            return
+        }
+        
+        // Проверяем кэш
+        if let cachedData = mediaCache[mediaURL] {
+            completion(cachedData)
+            return
+        }
+        
+        // Используем MXMediaManager для загрузки
+        mxSession.mediaManager.downloadMedia(
+            fromMatrixContentURI: mediaURL,
+            withType: nil,
+            inFolder: nil,
+            success: { [weak self] (outputFilePath: String?) in
+                guard let filePath = outputFilePath,
+                      let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+                    completion(nil)
+                    return
+                }
+                
+                DispatchQueue.main.async {
+                    self?.mediaCache[mediaURL] = data
+                    completion(data)
+                }
+            },
+            failure: { (error: Error?) in
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+            }
         )
     }
     
@@ -1877,8 +2714,17 @@ class MatrixService: ObservableObject {
             timeFormatter.timeStyle = .short
             let timeString = timeFormatter.string(from: lastMessage.timestamp)
             
+            var previewText = lastMessage.text
+            if lastMessage.messageType == .file {
+                previewText = "📎 Файл"
+            } else if lastMessage.messageType == .voice {
+                previewText = "🎤 Голосовое сообщение"
+            } else if lastMessage.messageType == .image {
+                previewText = "📷 Изображение"
+            }
+            
             return MessagePreview(
-                text: lastMessage.text,
+                text: previewText,
                 time: timeString
             )
         }
@@ -2114,6 +2960,7 @@ class MatrixService: ObservableObject {
         hasSetupRoomListeners = false
         reactionEvents.removeAll()
         roomStatuses.removeAll()
+        mediaCache.removeAll()
         lastRoomUpdate = Date()
     }
 }
