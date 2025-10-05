@@ -43,12 +43,30 @@ struct K34TextFieldStyle: TextFieldStyle {
     }
 }
 
-struct K34TabViewStyle: View {
-    var body: some View {
-        Rectangle()
-            .fill(K34Colors.darkGray)
-            .edgesIgnoringSafeArea(.bottom)
-    }
+// MARK: - Models
+struct MessageReaction: Identifiable {
+    let id = UUID()
+    let emoji: String
+    let count: Int
+    let users: [String]
+    var didReact: Bool = false
+}
+
+struct Message: Identifiable {
+    let id: String
+    let text: String
+    let sender: String
+    let timestamp: Date
+    let roomId: String
+    let isOutgoing: Bool
+    var reactions: [MessageReaction]
+}
+
+struct RoomStatus {
+    let roomId: String
+    let isInvited: Bool
+    let isInvitationOutgoing: Bool
+    let otherUserId: String?
 }
 
 // MARK: - Main Content View
@@ -132,7 +150,7 @@ struct ContentView: View {
             
             // Logo and Title
             VStack(spacing: 20) {
-                Image("login") // Замените "your-image-name" на имя вашего файла
+                Image("login")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 100, height: 100)
@@ -154,6 +172,8 @@ struct ContentView: View {
                 TextField("Имя пользователя", text: $username)
                     .textFieldStyle(K34TextFieldStyle())
                     .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
                     .padding(.horizontal)
                 
                 SecureField("Пароль", text: $password)
@@ -199,6 +219,27 @@ struct ChatListView: View {
     @ObservedObject var matrixService: MatrixService
     @State private var selectedRoomId: String?
     
+    var activeRooms: [MXRoom] {
+        matrixService.rooms.filter { room in
+            guard let status = matrixService.getRoomStatus(for: room) else { return true }
+            return !status.isInvited && !status.isInvitationOutgoing
+        }
+    }
+    
+    var invitationRooms: [MXRoom] {
+        matrixService.rooms.filter { room in
+            guard let status = matrixService.getRoomStatus(for: room) else { return false }
+            return status.isInvited
+        }
+    }
+    
+    var outgoingInvitationRooms: [MXRoom] {
+        matrixService.rooms.filter { room in
+            guard let status = matrixService.getRoomStatus(for: room) else { return false }
+            return status.isInvitationOutgoing
+        }
+    }
+    
     var body: some View {
         ZStack {
             K34Colors.background.ignoresSafeArea()
@@ -208,48 +249,56 @@ struct ChatListView: View {
                     K34Colors.background.ignoresSafeArea()
                     
                     List {
-                        if matrixService.rooms.isEmpty {
-                            // ИСПРАВЛЕННЫЙ БЛОК: Центрированное и красивое сообщение о пустом списке
-                            VStack(spacing: 25) {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 60))
-                                    .foregroundColor(K34Colors.lightGray)
+                        // Входящие приглашения
+                        if !invitationRooms.isEmpty {
+                            Section {
+                                ForEach(invitationRooms, id: \.roomId) { room in
+                                    chatRow(for: room)
+                                }
+                            } header: {
+                                Text("Входящие приглашения")
+                                    .font(.headline)
+                                    .foregroundColor(K34Colors.textPrimary)
                                     .padding(.bottom, 5)
-                                
-                                VStack(spacing: 12) {
-                                    Text("Пока нет чатов")
-                                        .font(.title2)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(K34Colors.textPrimary)
-                                    
-                                    Text("Начните новый чат, чтобы начать общение!")
-                                        .font(.body)
-                                        .foregroundColor(K34Colors.textSecondary)
-                                        .multilineTextAlignment(.center)
-                                        .lineSpacing(4)
-                                }
-                                .padding(.horizontal, 20)
                             }
-                            .frame(maxWidth: .infinity, minHeight: 300)
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets())
-                        } else {
-                            ForEach(matrixService.rooms, id: \.roomId) { room in
-                                ZStack {
-                                    NavigationLink(destination: ChatRoomView(matrixService: matrixService, room: room), tag: room.roomId, selection: $selectedRoomId) {
-                                        EmptyView()
-                                    }
-                                    .opacity(0)
-                                    
-                                    ChatRow(room: room, matrixService: matrixService)
-                                        .padding(.vertical, 8)
+                        }
+                        
+                        // Исходящие приглашения
+                        if !outgoingInvitationRooms.isEmpty {
+                            Section {
+                                ForEach(outgoingInvitationRooms, id: \.roomId) { room in
+                                    chatRow(for: room)
                                 }
-                                .listRowBackground(K34Colors.cardBackground)
+                            } header: {
+                                Text("Ожидают ответа")
+                                    .font(.headline)
+                                    .foregroundColor(K34Colors.textSecondary)
+                                    .padding(.bottom, 5)
+                            }
+                        }
+                        
+                        // Активные чаты
+                        Section {
+                            if activeRooms.isEmpty && invitationRooms.isEmpty && outgoingInvitationRooms.isEmpty {
+                                emptyStateView
+                            } else {
+                                ForEach(activeRooms, id: \.roomId) { room in
+                                    chatRow(for: room)
+                                }
+                            }
+                        } header: {
+                            if !activeRooms.isEmpty {
+                                Text("Активные чаты")
+                                    .font(.headline)
+                                    .foregroundColor(K34Colors.textPrimary)
+                                    .padding(.bottom, 5)
                             }
                         }
                     }
                     .listStyle(PlainListStyle())
                     .background(K34Colors.background)
+                    .scrollContentBackground(.hidden)
+                    .animation(.default, value: matrixService.rooms.count)
                 }
                 .navigationTitle("Чаты")
                 .navigationBarTitleDisplayMode(.large)
@@ -266,33 +315,95 @@ struct ChatListView: View {
             }
         }
     }
+    
+    private func chatRow(for room: MXRoom) -> some View {
+        ZStack {
+            NavigationLink(destination: ChatRoomView(matrixService: matrixService, room: room), tag: room.roomId, selection: $selectedRoomId) {
+                EmptyView()
+            }
+            .opacity(0)
+            
+            ChatRow(room: room, matrixService: matrixService)
+                .padding(.vertical, 8)
+        }
+        .listRowBackground(K34Colors.cardBackground)
+    }
+    
+    private var emptyStateView: some View {
+        VStack(spacing: 25) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 60))
+                .foregroundColor(K34Colors.lightGray)
+                .padding(.bottom, 5)
+            
+            VStack(spacing: 12) {
+                Text("Пока нет чатов")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundColor(K34Colors.textPrimary)
+                
+                Text("Начните новый чат, чтобы начать общение!")
+                    .font(.body)
+                    .foregroundColor(K34Colors.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+            }
+            .padding(.horizontal, 20)
+        }
+        .frame(maxWidth: .infinity, minHeight: 300)
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets())
+    }
 }
 
+// MARK: - Chat Row
 struct ChatRow: View {
     let room: MXRoom
     @ObservedObject var matrixService: MatrixService
     @State private var displayName: String = ""
     @State private var lastMessageText: String = "Пока нет сообщений"
+    @State private var roomStatus: RoomStatus?
     
     var body: some View {
         HStack(spacing: 15) {
-            // Avatar
-            ZStack {
-                Circle()
-                    .fill(K34Colors.primaryRed)
-                    .frame(width: 50, height: 50)
+            // Avatar with status indicator
+            ZStack(alignment: .bottomTrailing) {
+                ZStack {
+                    Circle()
+                        .fill(avatarColor)
+                        .frame(width: 50, height: 50)
+                    
+                    Text(displayName.prefix(1).uppercased())
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                }
                 
-                Text(displayName.prefix(1).uppercased())
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(.white)
+                // Status indicator
+                if let status = roomStatus {
+                    Circle()
+                        .fill(statusColor(for: status))
+                        .frame(width: 12, height: 12)
+                        .overlay(
+                            Circle()
+                                .stroke(K34Colors.background, lineWidth: 2)
+                        )
+                }
             }
             
             // Chat Info
             VStack(alignment: .leading, spacing: 4) {
-                Text(displayName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(K34Colors.textPrimary)
-                    .lineLimit(1)
+                HStack {
+                    Text(displayName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(K34Colors.textPrimary)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    if let status = roomStatus {
+                        statusBadge(for: status)
+                    }
+                }
                 
                 Text(lastMessageText)
                     .font(.system(size: 14))
@@ -310,7 +421,6 @@ struct ChatRow: View {
                     .padding(8)
                     .background(K34Colors.primaryRed)
                     .clipShape(Circle())
-                    .font(.caption)
             }
         }
         .padding(.vertical, 4)
@@ -325,9 +435,56 @@ struct ChatRow: View {
         }
     }
     
+    private var avatarColor: Color {
+        if let status = roomStatus {
+            if status.isInvited {
+                return K34Colors.primaryRed
+            } else if status.isInvitationOutgoing {
+                return K34Colors.lightGray
+            }
+        }
+        return K34Colors.primaryRed
+    }
+    
+    private func statusColor(for status: RoomStatus) -> Color {
+        if status.isInvited {
+            return .green
+        } else if status.isInvitationOutgoing {
+            return .yellow
+        }
+        return .green
+    }
+    
+    private func statusBadge(for status: RoomStatus) -> some View {
+        Group {
+            if status.isInvited {
+                Text("Приглашение")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.green)
+                    .cornerRadius(8)
+            } else if status.isInvitationOutgoing {
+                Text("Ожидание")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(K34Colors.textPrimary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.yellow)
+                    .cornerRadius(8)
+            }
+        }
+    }
+    
     private func updateDisplayInfo() {
         updateDisplayName()
         updateLastMessagePreview()
+        updateRoomStatus()
+    }
+    
+    private func updateRoomStatus() {
+        roomStatus = matrixService.getRoomStatus(for: room)
     }
     
     private func updateDisplayName() {
@@ -383,6 +540,8 @@ struct NewChatView: View {
                         TextField("Введите имя пользователя (например, ivanov)", text: $userId)
                             .textFieldStyle(K34TextFieldStyle())
                             .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .textInputAutocapitalization(.never)
                             .padding(.horizontal)
                         
                         Button(action: createDirectChat) {
@@ -440,6 +599,7 @@ struct ChatRoomView: View {
     let room: MXRoom
     @State private var messageText = ""
     @State private var showReactionPickerForMessage: String? = nil
+    @State private var roomStatus: RoomStatus?
     
     var roomMessages: [Message] {
         matrixService.messages
@@ -451,95 +611,28 @@ struct ChatRoomView: View {
         matrixService.isLoadingHistory[room.roomId] ?? false
     }
     
+    var isInvited: Bool {
+        roomStatus?.isInvited == true
+    }
+    
     var body: some View {
         ZStack {
             K34Colors.background.ignoresSafeArea()
             
-            VStack(spacing: 0) {
-                if isLoading {
-                    HStack {
-                        ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
-                            .scaleEffect(0.8)
-                        Text("Загрузка сообщений...")
-                            .font(.caption)
-                            .foregroundColor(K34Colors.textSecondary)
-                    }
-                    .padding()
-                    .background(K34Colors.cardBackground)
-                }
-                
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack {
-                            if !isLoading && roomMessages.isEmpty {
-                                VStack(spacing: 20) {
-                                    Image(systemName: "message")
-                                        .font(.system(size: 50))
-                                        .foregroundColor(K34Colors.lightGray)
-                                    Text("Пока нет сообщений")
-                                        .font(.title2)
-                                        .foregroundColor(K34Colors.textPrimary)
-                                    Text("Начните общение!")
-                                        .font(.body)
-                                        .foregroundColor(K34Colors.textSecondary)
-                                }
-                                .frame(height: 300)
-                                .padding(40)
-                            } else {
-                                ForEach(roomMessages) { message in
-                                    MessageBubble(
-                                        message: message,
-                                        matrixService: matrixService,
-                                        room: room,
-                                        showReactionPickerForMessage: $showReactionPickerForMessage
-                                    )
-                                    .id(message.id)
-                                }
-                            }
-                        }
-                        .padding()
-                    }
-                    .onChange(of: roomMessages.count) { _ in
-                        if let lastMessage = roomMessages.last {
-                            withAnimation {
-                                proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                    .onAppear {
-                        if let lastMessage = roomMessages.last {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                        }
-                    }
-                }
-                
-                // Message Input
-                HStack(spacing: 12) {
-                    TextField("Напишите сообщение...", text: $messageText)
-                        .textFieldStyle(K34TextFieldStyle())
-                        .onSubmit {
-                            sendMessage()
-                        }
-                    
-                    Button(action: sendMessage) {
-                        Image(systemName: "paperplane.fill")
-                            .foregroundColor(.white)
-                            .padding(12)
-                            .background(K34Colors.primaryRed)
-                            .clipShape(Circle())
-                            .shadow(color: K34Colors.primaryRed.opacity(0.3), radius: 5)
-                    }
-                    .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .padding()
-                .background(K34Colors.cardBackground)
+            if isInvited {
+                invitationView
+            } else {
+                chatView
             }
         }
         .navigationTitle(matrixService.getDisplayName(for: room))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
+            updateRoomStatus()
+        }
+        .onReceive(matrixService.objectWillChange) { _ in
+            updateRoomStatus()
         }
         .sheet(item: $showReactionPickerForMessage) { messageId in
             ReactionPickerView(
@@ -547,6 +640,160 @@ struct ChatRoomView: View {
                 matrixService: matrixService,
                 room: room
             )
+        }
+    }
+    
+    private var chatView: some View {
+        VStack(spacing: 0) {
+            if isLoading {
+                HStack {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                        .scaleEffect(0.8)
+                    Text("Загрузка сообщений...")
+                        .font(.caption)
+                        .foregroundColor(K34Colors.textSecondary)
+                }
+                .padding()
+                .background(K34Colors.cardBackground)
+            }
+            
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack {
+                        if !isLoading && roomMessages.isEmpty {
+                            VStack(spacing: 20) {
+                                Image(systemName: "message")
+                                    .font(.system(size: 50))
+                                    .foregroundColor(K34Colors.lightGray)
+                                Text("Пока нет сообщений")
+                                    .font(.title2)
+                                    .foregroundColor(K34Colors.textPrimary)
+                                Text("Начните общение!")
+                                    .font(.body)
+                                    .foregroundColor(K34Colors.textSecondary)
+                            }
+                            .frame(height: 300)
+                            .padding(40)
+                        } else {
+                            ForEach(roomMessages) { message in
+                                MessageBubble(
+                                    message: message,
+                                    matrixService: matrixService,
+                                    room: room,
+                                    showReactionPickerForMessage: $showReactionPickerForMessage
+                                )
+                                .id(message.id)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: roomMessages.count) { _ in
+                    if let lastMessage = roomMessages.last {
+                        withAnimation {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onAppear {
+                    if let lastMessage = roomMessages.last {
+                        proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                    }
+                }
+            }
+            
+            // Message Input
+            HStack(spacing: 12) {
+                TextField("Напишите сообщение...", text: $messageText)
+                    .textFieldStyle(K34TextFieldStyle())
+                    .onSubmit {
+                        sendMessage()
+                    }
+                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
+                
+                Button(action: sendMessage) {
+                    Image(systemName: "paperplane.fill")
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(K34Colors.primaryRed)
+                        .clipShape(Circle())
+                        .shadow(color: K34Colors.primaryRed.opacity(0.3), radius: 5)
+                }
+                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding()
+            .background(K34Colors.cardBackground)
+        }
+    }
+    
+    private var invitationView: some View {
+        VStack(spacing: 30) {
+            Spacer()
+            
+            VStack(spacing: 20) {
+                Image(systemName: "envelope.badge")
+                    .font(.system(size: 60))
+                    .foregroundColor(K34Colors.primaryRed)
+                
+                Text("Приглашение в чат")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(K34Colors.textPrimary)
+                
+                Text("Вас пригласили в чат с пользователем")
+                    .font(.body)
+                    .foregroundColor(K34Colors.textSecondary)
+                    .multilineTextAlignment(.center)
+                
+                Text(matrixService.getDisplayName(for: room))
+                    .font(.headline)
+                    .foregroundColor(K34Colors.primaryRed)
+                    .padding()
+                    .background(K34Colors.cardBackground)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal, 20)
+            
+            Spacer()
+            
+            VStack(spacing: 15) {
+                Button("Принять приглашение") {
+                    acceptInvitation()
+                }
+                .buttonStyle(K34ButtonStyle())
+                .frame(maxWidth: .infinity)
+                
+                Button("Отклонить") {
+                    rejectInvitation()
+                }
+                .foregroundColor(K34Colors.lightRed)
+                .padding()
+            }
+            .padding(.horizontal, 20)
+            
+            Spacer()
+        }
+    }
+    
+    private func updateRoomStatus() {
+        roomStatus = matrixService.getRoomStatus(for: room)
+    }
+    
+    private func acceptInvitation() {
+        matrixService.acceptInvitation(roomId: room.roomId) { success in
+            if success {
+                // Автоматически перейдет в обычный режим чата
+            }
+        }
+    }
+    
+    private func rejectInvitation() {
+        matrixService.rejectInvitation(roomId: room.roomId) { success in
+            if success {
+                // Вернется в список чатов
+            }
         }
     }
     
@@ -588,6 +835,7 @@ struct MessageBubble: View {
                             RoundedRectangle(cornerRadius: 18)
                                 .stroke(message.isOutgoing ? K34Colors.primaryRed : K34Colors.lightGray, lineWidth: 1)
                         )
+                        .fixedSize(horizontal: false, vertical: true)
                         .contextMenu {
                             Button {
                                 showReactionPickerForMessage = message.id
@@ -633,6 +881,12 @@ struct MessageBubble: View {
     private func formatTimestamp(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
+        
+        // Проверка на валидность даты
+        guard date.timeIntervalSince1970 > 0 else {
+            return "--:--"
+        }
+        
         return formatter.string(from: date)
     }
     
@@ -687,8 +941,10 @@ struct ReactionsView: View {
                         }
                     }
                 }
+                .fixedSize(horizontal: true, vertical: true)
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -867,28 +1123,7 @@ struct ProfileView: View {
     }
 }
 
-// Остальной код MatrixService и моделей остается без изменений...
-// [MatrixService, Message, MessageReaction и все extensions остаются такими же как в предыдущей версии]
-
-// MARK: - Models and Services
-struct MessageReaction: Identifiable {
-    let id = UUID()
-    let emoji: String
-    let count: Int
-    let users: [String]
-    var didReact: Bool = false // Добавляем флаг, поставил ли текущий пользователь эту реакцию
-}
-
-struct Message: Identifiable {
-    let id: String
-    let text: String
-    let sender: String
-    let timestamp: Date
-    let roomId: String
-    let isOutgoing: Bool
-    var reactions: [MessageReaction]
-}
-
+// MARK: - Matrix Service
 class MatrixService: ObservableObject {
     @Published var messages: [Message] = []
     @Published var rooms: [MXRoom] = []
@@ -897,6 +1132,7 @@ class MatrixService: ObservableObject {
     @Published var isLoggedIn = false
     @Published var currentUserId: String?
     @Published var isLoadingHistory: [String: Bool] = [:]
+    @Published var roomStatuses: [String: RoomStatus] = [:]
     
     private var mxRestClient: MXRestClient?
     private var mxSession: MXSession?
@@ -904,7 +1140,7 @@ class MatrixService: ObservableObject {
     private var userDisplayNames: [String: String] = [:]
     private var processedEventIds: Set<String> = []
     private var hasSetupRoomListeners = false
-    private var reactionEvents: [String: [MXEvent]] = [:] // Кэш реакций по messageId
+    private var reactionEvents: [String: [MXEvent]] = [:]
 
     // MARK: - Login and Session Setup
     func login(username: String, password: String) {
@@ -952,6 +1188,109 @@ class MatrixService: ObservableObject {
     func loadRooms() {
         guard let session = mxSession else { return }
         rooms = session.rooms ?? []
+        updateRoomStatuses()
+    }
+    
+    // MARK: - Room Status Management
+    private func updateRoomStatuses() {
+        guard let session = mxSession else { return }
+        
+        var newStatuses: [String: RoomStatus] = [:]
+        
+        for room in session.rooms ?? [] {
+            let roomId = room.roomId
+            let membership = room.summary?.membership ?? .unknown
+            
+            let isInvited = membership == .invite
+            let isInvitationOutgoing = self.isInvitationOutgoing(room: room)
+            let otherUserId = self.getOtherUserId(for: room)
+            
+            newStatuses[roomId!] = RoomStatus(
+                roomId: roomId!,
+                isInvited: isInvited,
+                isInvitationOutgoing: isInvitationOutgoing,
+                otherUserId: otherUserId
+            )
+        }
+        
+        DispatchQueue.main.async {
+            self.roomStatuses = newStatuses
+        }
+    }
+    
+    private func isInvitationOutgoing(room: MXRoom) -> Bool {
+        // Упрощенная логика: считаем что комната с исходящим приглашением
+        // если мы ее создали и у нее есть приглашенные участники
+        guard let summary = room.summary else { return false }
+        
+        // Если мы создатель комнаты и наша membership - join,
+        // но комната еще не полностью активна (мало сообщений)
+        if summary.membership == .join {
+            // Исправление: правильный доступ к membersCount
+            let memberCount = summary.membersCount.members
+            let hasLastMessage = summary.lastMessage != nil
+            
+            return memberCount <= 2 && !hasLastMessage
+        }
+        
+        return false
+    }
+    
+    private func getOtherUserId(for room: MXRoom) -> String? {
+        // Для прямых чатов используем directUserId
+        if room.isDirect {
+            return room.directUserId
+        }
+        
+        // Для групповых чатов возвращаем отображаемое имя или nil
+        return room.summary?.displayName
+    }
+    
+    func getRoomStatus(for room: MXRoom) -> RoomStatus? {
+        return roomStatuses[room.roomId]
+    }
+    
+    // MARK: - Invitation Handling
+    func acceptInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
+        guard let room = mxSession?.room(withRoomId: roomId) else {
+            completion(false)
+            return
+        }
+        
+        room.join { [weak self] response in
+            DispatchQueue.main.async {
+                switch response {
+                case .success:
+                    self?.loadRooms()
+                    self?.updateRoomStatuses()
+                    completion(true)
+                case .failure(let error):
+                    self?.error = "Ошибка принятия приглашения: \(error.localizedDescription)"
+                    completion(false)
+                }
+            }
+        }
+    }
+    
+    func rejectInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
+        guard let room = mxSession?.room(withRoomId: roomId) else {
+            completion(false)
+            return
+        }
+        
+        room.leave { [weak self] response in
+            DispatchQueue.main.async {
+                switch response {
+                case .success:
+                    self?.loadRooms()
+                    self?.updateRoomStatuses()
+                    completion(true)
+                case .failure(let error):
+                    self?.error = "Ошибка отклонения приглашения: \(error.localizedDescription)"
+                    completion(false)
+                }
+            }
+        }
     }
     
     private func setupAllRoomListeners() {
@@ -961,6 +1300,7 @@ class MatrixService: ObservableObject {
             setupRoomListener(for: room)
         }
         hasSetupRoomListeners = true
+        updateRoomStatuses()
     }
     
     private func setupRoomListener(for room: MXRoom) {
@@ -988,8 +1328,6 @@ class MatrixService: ObservableObject {
         guard let room = mxSession?.room(withRoomId: roomId) else { return }
         
         isLoadingHistory[roomId] = true
-        
-        // Загружаем историю сообщений для этой комнаты
         loadRoomHistory(for: room)
     }
     
@@ -1004,10 +1342,7 @@ class MatrixService: ObservableObject {
                 return
             }
             
-            // Сбрасываем пагинацию и загружаем историю
             timeline.resetPagination()
-            
-            // Загружаем исторические сообщения
             self.paginateRoomHistory(timeline: timeline, room: room)
         }
     }
@@ -1020,15 +1355,11 @@ class MatrixService: ObservableObject {
             
             switch response {
             case .success:
-                // Проверяем, есть ли еще сообщения для загрузки
                 if timeline.canPaginate(.backwards) {
-                    // Продолжаем загрузку
                     self.paginateRoomHistory(timeline: timeline, room: room)
                 } else {
-                    // Завершили загрузку истории
                     DispatchQueue.main.async {
                         self.isLoadingHistory[roomId] = false
-                        print("Завершена загрузка истории для комнаты: \(roomId)")
                     }
                 }
             case .failure(let error):
@@ -1041,26 +1372,26 @@ class MatrixService: ObservableObject {
     }
     
     private func handleTimelineEvent(_ event: MXEvent, direction: MXTimelineDirection, roomId: String) {
-        // Обрабатываем ВСЕ события
+        if event.eventType == .roomMember {
+            DispatchQueue.main.async {
+                self.updateRoomStatuses()
+            }
+        }
+        
         if event.eventType == .roomMessage {
             if let message = createMessage(from: event, roomId: roomId) {
                 DispatchQueue.main.async {
                     if !self.processedEventIds.contains(message.id) {
                         self.processedEventIds.insert(message.id)
                         self.messages.append(message)
-                        
-                        // Сортируем сообщения по времени
                         self.messages.sort { $0.timestamp < $1.timestamp }
-                        
                         self.objectWillChange.send()
                     }
                 }
             }
         } else if event.eventType == .reaction {
-            // Обрабатываем реакции
             handleReactionEvent(event, roomId: roomId)
         } else if event.eventType == .roomRedaction {
-            // Обрабатываем отзыв событий (включая реакции)
             handleRedactionEvent(event, roomId: roomId)
         }
     }
@@ -1069,19 +1400,15 @@ class MatrixService: ObservableObject {
         guard let redactedEventId = event.redacts else { return }
         
         DispatchQueue.main.async {
-            // Ищем отозванное событие в кэше реакций
             for (messageId, events) in self.reactionEvents {
                 if let index = events.firstIndex(where: { $0.eventId == redactedEventId }) {
-                    // Удаляем отозванную реакцию из кэша
                     self.reactionEvents[messageId]?.remove(at: index)
                     
-                    // Обновляем сообщение с новыми реакциями
                     if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
                         var updatedMessage = self.messages[messageIndex]
                         updatedMessage.reactions = self.calculateReactions(for: messageId)
                         self.messages[messageIndex] = updatedMessage
                     }
-                    
                     break
                 }
             }
@@ -1091,7 +1418,6 @@ class MatrixService: ObservableObject {
     }
     
     private func handleReactionEvent(_ event: MXEvent, roomId: String) {
-        // Пропускаем отозванные события реакций
         if event.isRedactedEvent() {
             return
         }
@@ -1105,25 +1431,20 @@ class MatrixService: ObservableObject {
         }
         
         DispatchQueue.main.async {
-            // Обновляем кэш реакций
             if self.reactionEvents[eventId] == nil {
                 self.reactionEvents[eventId] = []
             }
             
-            // Проверяем, есть ли уже такая реакция от этого пользователя
             if let existingIndex = self.reactionEvents[eventId]?.firstIndex(where: {
                 $0.eventId == event.eventId ||
                 ($0.sender == event.sender &&
                  ($0.content["m.relates_to"] as? [String: Any])?["key"] as? String == key)
             }) {
-                // Заменяем существующую реакцию
                 self.reactionEvents[eventId]?[existingIndex] = event
             } else {
-                // Добавляем новую реакцию
                 self.reactionEvents[eventId]?.append(event)
             }
             
-            // Обновляем сообщение с новыми реакциями
             if let messageIndex = self.messages.firstIndex(where: { $0.id == eventId }) {
                 var updatedMessage = self.messages[messageIndex]
                 updatedMessage.reactions = self.calculateReactions(for: eventId)
@@ -1139,7 +1460,6 @@ class MatrixService: ObservableObject {
         var reactionCounts: [String: (count: Int, users: [String])] = [:]
         
         for event in events {
-            // Пропускаем отозванные события
             if event.isRedactedEvent() {
                 continue
             }
@@ -1151,7 +1471,6 @@ class MatrixService: ObservableObject {
                 reactionCounts[key] = (0, [])
             }
             
-            // Упрощенная проверка на отозванное событие
             let isRedacted = event.isState()
             if !isRedacted, let sender = event.sender {
                 reactionCounts[key]?.count += 1
@@ -1186,8 +1505,9 @@ class MatrixService: ObservableObject {
             return nil
         }
         
+        // Исправление для NaN ошибки: безопасное создание даты
         let timestamp: Date
-        if event.originServerTs != 0 {
+        if event.originServerTs != 0 && event.originServerTs > 1000000000000 {
             timestamp = Date(timeIntervalSince1970: TimeInterval(event.originServerTs / 1000))
         } else {
             timestamp = Date()
@@ -1211,8 +1531,6 @@ class MatrixService: ObservableObject {
     func addReaction(_ emoji: String, to messageId: String, in roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId) else { return }
         
-        // В Matrix SDK 0.27.17 используем альтернативный метод для отправки реакций
-        // Создаем событие реакции вручную
         let reactionContent: [String: Any] = [
             "m.relates_to": [
                 "rel_type": "m.annotation",
@@ -1221,12 +1539,12 @@ class MatrixService: ObservableObject {
             ]
         ]
         var localEcho: MXEvent?
-        // Отправляем событие реакции
+        
         room.sendEvent(.reaction, content: reactionContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
             DispatchQueue.main.async {
                 switch response {
                 case .success:
-                    break // Реакция успешно отправлена
+                    break
                 case .failure(let error):
                     self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
                 }
@@ -1234,12 +1552,10 @@ class MatrixService: ObservableObject {
         }
     }
     
-    // MARK: - Remove Reaction
     func removeReaction(_ emoji: String, from messageId: String, in roomId: String) {
         guard let room = mxSession?.room(withRoomId: roomId),
               let events = reactionEvents[messageId] else { return }
         
-        // Находим событие реакции, которое нужно удалить
         let reactionEventToRemove = events.first { event in
             guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
                   let key = relatesTo["key"] as? String,
@@ -1254,10 +1570,8 @@ class MatrixService: ObservableObject {
         
         guard let eventToRemove = reactionEventToRemove else { return }
         
-        // Немедленно обновляем UI - удаляем реакцию локально
         if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
             var updatedMessage = self.messages[messageIndex]
-            // Удаляем реакцию из локального кэша
             if let index = self.reactionEvents[messageId]?.firstIndex(where: { $0.eventId == eventToRemove.eventId }) {
                 self.reactionEvents[messageId]?.remove(at: index)
             }
@@ -1266,13 +1580,10 @@ class MatrixService: ObservableObject {
             self.objectWillChange.send()
         }
         
-        // Отправляем отзыв события реакции
         room.redactEvent(eventToRemove.eventId, reason: nil) { [weak self] (response: MXResponse<Void>) in
             DispatchQueue.main.async {
                 switch response {
                 case .success:
-                    print("Реакция удалена")
-                    // Дополнительное обновление после успешного отзыва
                     if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
                         var updatedMessage = self?.messages[messageIndex]
                         updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
@@ -1281,7 +1592,6 @@ class MatrixService: ObservableObject {
                     }
                 case .failure(let error):
                     self?.error = "Ошибка при удалении реакции: \(error.localizedDescription)"
-                    // В случае ошибки - восстанавливаем реакцию в UI
                     if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
                         var updatedMessage = self?.messages[messageIndex]
                         updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
@@ -1313,6 +1623,7 @@ class MatrixService: ObservableObject {
                     self?.rooms.append(room)
                     self?.error = nil
                     self?.setupRoomListener(for: room)
+                    self?.updateRoomStatuses()
                     completion(true)
                 case .failure(let error):
                     self?.error = "Ошибка при создании чата: \(error.localizedDescription)"
@@ -1381,7 +1692,6 @@ class MatrixService: ObservableObject {
     
     // MARK: - Last Message Preview
     func getLastMessagePreview(for room: MXRoom) -> String {
-        // Сначала проверяем загруженные сообщения
         let roomMessages = messages
             .filter { $0.roomId == room.roomId }
             .sorted { $0.timestamp > $1.timestamp }
@@ -1390,7 +1700,6 @@ class MatrixService: ObservableObject {
             return lastMessage.text
         }
         
-        // Затем проверяем summary комнаты
         if let lastMessage = room.summary?.lastMessage,
            let text = lastMessage.text, !text.isEmpty {
             return text
@@ -1431,8 +1740,8 @@ class MatrixService: ObservableObject {
         processedEventIds.removeAll()
         hasSetupRoomListeners = false
         reactionEvents.removeAll()
+        roomStatuses.removeAll()
     }
-    
 }
 
 // MARK: - Extensions
@@ -1443,10 +1752,9 @@ extension MXRoom: Identifiable {
 extension String: Identifiable {
     public var id: String { self }
 }
-// MARK: - Extensions for Event Handling
+
 extension MXEvent {
     func isRedactedEvent() -> Bool {
-        // Проверяем, является ли событие отзывом или отозванным событием
         return self.eventType == .roomRedaction || self.isState()
     }
 }
