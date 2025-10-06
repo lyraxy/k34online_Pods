@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>top-level-items</key>
+	<array>
+		<dict>
+			<key>destination</key>
+			<dict>
+				<key>location-parameters</key>
+				<dict>
+					<key>EndingColumnNumber</key>
+					<string>23</string>
+					<key>EndingLineNumber</key>
+					<string>104</string>
+					<key>StartingColumnNumber</key>
+					<string>23</string>
+					<key>StartingLineNumber</key>
+					<string>104</string>
+					<key>Timestamp</key>
+					<string>781445012.385305</string>
+				</dict>
+				<key>rebasable-url</key>
+				<dict>
+					<key>base</key>
+					<string>workspace</string>
+					<key>payload</key>
+					<dict>
+						<key>relative-path</key>
+						<string>k34/Pods/OLMKit/include/olm/list.hh</string>
+					</dict>
+				</dict>
+			</dict>
+			<key>text-context</key>
+			<dict>
+				<key>focused</key>
+				<string></string>
+				<key>leading</key>
+				<string>        while (other_pos != other._end) {
+            *this_pos = *other;
+            ++this_pos;</string>
+				<key>trailing</key>
+				<string>
+        }
+        _end = this_pos;
+</string>
+			</dict>
+			<key>title</key>
+			<string>Error: Cannot assign to variable 'other_pos' with const-qualified type 'T *const'</string>
+			<key>type</key>
+			<string>bookmark</string>
+		</dict>
+	</array>
+</dict>
+</plist>

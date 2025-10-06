@@ -7,14 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0BFAC1C68EA441808A284036 /* Pods_SimpleMatrixMessenger.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E7357389121A87DC4282B822 /* Pods_SimpleMatrixMessenger.framework */; };
+		95DE2654C373BE6EB2D55909 /* Pods_K_34_Online.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F563078B8CFD2311CC511EC9 /* Pods_K_34_Online.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		0DB891C72E7EB69900DA44D4 /* K-34 Online.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "K-34 Online.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		43E1435D8844AFE11B6F1ECA /* Pods-SimpleMatrixMessenger.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SimpleMatrixMessenger.debug.xcconfig"; path = "Target Support Files/Pods-SimpleMatrixMessenger/Pods-SimpleMatrixMessenger.debug.xcconfig"; sourceTree = "<group>"; };
-		7DD16D9A9728E52091FAAAB0 /* Pods-SimpleMatrixMessenger.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SimpleMatrixMessenger.release.xcconfig"; path = "Target Support Files/Pods-SimpleMatrixMessenger/Pods-SimpleMatrixMessenger.release.xcconfig"; sourceTree = "<group>"; };
-		E7357389121A87DC4282B822 /* Pods_SimpleMatrixMessenger.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SimpleMatrixMessenger.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DB891C72E7EB69900DA44D4 /* K-34 Online.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = "K-34 Online.app"; path = "/Users/lyraxy/Desktop/k34/build/Debug-iphoneos/K-34 Online.app"; sourceTree = "<absolute>"; };
+		339EBC0957D2661214CCFC86 /* Pods-K-34 Online.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-K-34 Online.release.xcconfig"; path = "Target Support Files/Pods-K-34 Online/Pods-K-34 Online.release.xcconfig"; sourceTree = "<group>"; };
+		9482AF4DD1A0E2FE26009372 /* Pods-K-34 Online.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-K-34 Online.debug.xcconfig"; path = "Target Support Files/Pods-K-34 Online/Pods-K-34 Online.debug.xcconfig"; sourceTree = "<group>"; };
+		F563078B8CFD2311CC511EC9 /* Pods_K_34_Online.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_K_34_Online.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -22,6 +22,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				Models/Message.swift,
 			);
 			target = 0DB891C62E7EB69900DA44D4 /* K-34 Online */;
 		};
@@ -43,7 +44,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0BFAC1C68EA441808A284036 /* Pods_SimpleMatrixMessenger.framework in Frameworks */,
+				95DE2654C373BE6EB2D55909 /* Pods_K_34_Online.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -63,7 +64,6 @@
 		0DB891C82E7EB69900DA44D4 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				0DB891C72E7EB69900DA44D4 /* K-34 Online.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -71,7 +71,7 @@
 		673CF904D2640B1C39F8652B /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				E7357389121A87DC4282B822 /* Pods_SimpleMatrixMessenger.framework */,
+				F563078B8CFD2311CC511EC9 /* Pods_K_34_Online.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -79,8 +79,8 @@
 		CF0D0813CD86D45379D6E0A5 /* Pods */ = {
 			isa = PBXGroup;
 			children = (
-				43E1435D8844AFE11B6F1ECA /* Pods-SimpleMatrixMessenger.debug.xcconfig */,
-				7DD16D9A9728E52091FAAAB0 /* Pods-SimpleMatrixMessenger.release.xcconfig */,
+				9482AF4DD1A0E2FE26009372 /* Pods-K-34 Online.debug.xcconfig */,
+				339EBC0957D2661214CCFC86 /* Pods-K-34 Online.release.xcconfig */,
 			);
 			path = Pods;
 			sourceTree = "<group>";
@@ -134,6 +134,9 @@
 			);
 			mainGroup = 0DB891BE2E7EB69900DA44D4;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0D6318852E93C84D002A6105 /* XCRemoteSwiftPackageReference "olm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0DB891C82E7EB69900DA44D4 /* Products */;
 			projectDirPath = "";
@@ -170,7 +173,7 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(DERIVED_FILE_DIR)/Pods-SimpleMatrixMessenger-checkManifestLockResult.txt",
+				"$(DERIVED_FILE_DIR)/Pods-K-34 Online-checkManifestLockResult.txt",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -183,19 +186,15 @@
 			files = (
 			);
 			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-SimpleMatrixMessenger/Pods-SimpleMatrixMessenger-frameworks-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			inputPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-K-34 Online/Pods-K-34 Online-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-SimpleMatrixMessenger/Pods-SimpleMatrixMessenger-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-K-34 Online/Pods-K-34 Online-frameworks-${CONFIGURATION}-output-files.xcfilelist",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-SimpleMatrixMessenger/Pods-SimpleMatrixMessenger-frameworks.sh\"\n";
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-K-34 Online/Pods-K-34 Online-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -336,7 +335,7 @@
 		};
 		0DB891D32E7EB69A00DA44D4 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 43E1435D8844AFE11B6F1ECA /* Pods-SimpleMatrixMessenger.debug.xcconfig */;
+			baseConfigurationReference = 9482AF4DD1A0E2FE26009372 /* Pods-K-34 Online.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -368,7 +367,7 @@
 		};
 		0DB891D42E7EB69A00DA44D4 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 7DD16D9A9728E52091FAAAB0 /* Pods-SimpleMatrixMessenger.release.xcconfig */;
+			baseConfigurationReference = 339EBC0957D2661214CCFC86 /* Pods-K-34 Online.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -420,6 +419,17 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0D6318852E93C84D002A6105 /* XCRemoteSwiftPackageReference "olm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/matrix-org/olm";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
 	};
 	rootObject = 0DB891BF2E7EB69900DA44D4 /* Project object */;
 }
