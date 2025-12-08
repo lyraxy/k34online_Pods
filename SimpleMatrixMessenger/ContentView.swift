@@ -54,6 +54,54 @@ class KeychainHelper {
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess
     }
+    
+    func setString(_ string: String, forKey key: String) -> Bool {
+        guard let data = string.data(using: .utf8) else { return false }
+        return set(data, forKey: key)
+    }
+    
+    func getString(_ key: String) -> String? {
+        guard let data = getData(key) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+// MARK: - User Credentials Manager
+class UserCredentialsManager {
+    static let shared = UserCredentialsManager()
+    private let keychain = KeychainHelper.shared
+    
+    private let usernameKey = "com.k34.online.username"
+    private let passwordKey = "com.k34.online.password"
+    private let isLoggedInKey = "com.k34.online.isLoggedIn"
+    
+    private init() {}
+    
+    func saveCredentials(username: String, password: String) {
+        keychain.setString(username, forKey: usernameKey)
+        keychain.setString(password, forKey: passwordKey)
+        UserDefaults.standard.set(true, forKey: isLoggedInKey)
+        UserDefaults.standard.synchronize()
+    }
+    
+    func getCredentials() -> (username: String?, password: String?) {
+        let username = keychain.getString(usernameKey)
+        let password = keychain.getString(passwordKey)
+        return (username, password)
+    }
+    
+    func clearCredentials() {
+        keychain.delete(usernameKey)
+        keychain.delete(passwordKey)
+        UserDefaults.standard.set(false, forKey: isLoggedInKey)
+        UserDefaults.standard.synchronize()
+    }
+    
+    func hasSavedCredentials() -> Bool {
+        return UserDefaults.standard.bool(forKey: isLoggedInKey) &&
+               keychain.getString(usernameKey) != nil &&
+               keychain.getString(passwordKey) != nil
+    }
 }
 
 // MARK: - Encryption Utilities
@@ -633,13 +681,16 @@ struct ContentView: View {
     @State private var password = ""
     @State private var isLoggedIn = false
     @State private var selectedTab = 0
+    @State private var isLoadingSavedCredentials = false
     
     var body: some View {
         NavigationView {
             ZStack {
                 K34Colors.background.ignoresSafeArea()
                 
-                if isLoggedIn {
+                if isLoadingSavedCredentials {
+                    loadingView
+                } else if isLoggedIn {
                     mainView
                 } else {
                     loginView
@@ -650,6 +701,36 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onChange(of: matrixService.isLoggedIn) { newValue in
             isLoggedIn = newValue
+            if !newValue {
+                UserCredentialsManager.shared.clearCredentials()
+            }
+        }
+        .onAppear {
+            checkSavedCredentials()
+        }
+    }
+    
+    var loadingView: some View {
+        VStack(spacing: 30) {
+            Spacer()
+            
+            VStack(spacing: 20) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 60))
+                    .foregroundColor(K34Colors.primaryRed)
+                    .scaleEffect(1.5)
+                
+                Text("Загрузка...")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(K34Colors.textPrimary)
+                
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                    .scaleEffect(1.2)
+            }
+            
+            Spacer()
         }
     }
     
@@ -735,17 +816,20 @@ struct ContentView: View {
                     .textFieldStyle(K34TextFieldStyle())
                     .padding(.horizontal)
                 
-                Button("Войти") {
-                    matrixService.login(username: username, password: password)
+                HStack {
+                    Button("Войти") {
+                        handleLogin()
+                    }
+                    .buttonStyle(K34ButtonStyle())
+                    .disabled(username.isEmpty || password.isEmpty || matrixService.isLoading)
+                    
+                    if matrixService.isLoading {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
+                            .padding(.leading, 10)
+                    }
                 }
-                .buttonStyle(K34ButtonStyle())
                 .padding(.top, 10)
-                
-                if matrixService.isLoading {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: K34Colors.primaryRed))
-                        .scaleEffect(1.2)
-                }
                 
                 if let error = matrixService.error {
                     Text(error)
@@ -765,6 +849,26 @@ struct ContentView: View {
                 .padding(.bottom, 20)
         }
         .background(K34Colors.background.ignoresSafeArea())
+    }
+    
+    private func handleLogin() {
+        UserCredentialsManager.shared.saveCredentials(username: username, password: password)
+        matrixService.login(username: username, password: password)
+    }
+    
+    private func checkSavedCredentials() {
+        if UserCredentialsManager.shared.hasSavedCredentials() {
+            isLoadingSavedCredentials = true
+            
+            let credentials = UserCredentialsManager.shared.getCredentials()
+            username = credentials.username ?? ""
+            password = credentials.password ?? ""
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                matrixService.login(username: username, password: password)
+                isLoadingSavedCredentials = false
+            }
+        }
     }
 }
 
@@ -2506,6 +2610,7 @@ struct ProfileView: View {
                     Button("Выйти") {
                         matrixService.logout()
                         cryptoService.reset()
+                        UserCredentialsManager.shared.clearCredentials()
                     }
                     .buttonStyle(K34ButtonStyle())
                     .padding(.horizontal, 40)
@@ -2552,6 +2657,8 @@ class MatrixService: ObservableObject {
     private var reactionEvents: [String: [MXEvent]] = [:]
     private var backgroundRefreshTimer: Timer?
     private var mediaCache: [String: Data] = [:]
+    
+    private let credentialsManager = UserCredentialsManager.shared
 
     // MARK: - Login and Session Setup
     func login(username: String, password: String) {
@@ -2572,9 +2679,20 @@ class MatrixService: ObservableObject {
                     self.setupSession(credentials: credentials)
                     self.isLoggedIn = true
                     self.currentUserId = credentials.userId
+                    
+                    // Save credentials for future use
+                    self.credentialsManager.saveCredentials(username: username, password: password)
+                    
                 case .failure(let error):
                     self.error = error.localizedDescription
                     self.isLoggedIn = false
+                    
+                    // Clear invalid credentials
+                    if error.localizedDescription.contains("неверные учетные данные") ||
+                       error.localizedDescription.contains("invalid credentials") ||
+                       error.localizedDescription.contains("401") {
+                        self.credentialsManager.clearCredentials()
+                    }
                 }
             }
         }
@@ -2593,6 +2711,18 @@ class MatrixService: ObservableObject {
                 self.startBackgroundRefresh()
             } else if case .failure(let error) = response {
                 self.error = error.localizedDescription
+                self.isLoggedIn = false
+            }
+        }
+    }
+    
+    func autoLoginIfPossible() {
+        if credentialsManager.hasSavedCredentials() {
+            let credentials = credentialsManager.getCredentials()
+            if let username = credentials.username, let password = credentials.password {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.login(username: username, password: password)
+                }
             }
         }
     }
@@ -3578,6 +3708,8 @@ class MatrixService: ObservableObject {
         roomStatuses.removeAll()
         mediaCache.removeAll()
         lastRoomUpdate = Date()
+        
+        // Credentials are cleared in ProfileView
     }
 }
 
