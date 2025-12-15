@@ -3,6 +3,64 @@ import MatrixSDK
 import AVFoundation
 import CryptoKit
 import Security
+import WebRTC
+import Combine
+
+// MARK: - Color Theme
+struct K34Colors {
+    static let primaryRed = Color(red: 0.8, green: 0.1, blue: 0.1)
+    static let darkRed = Color(red: 0.6, green: 0.05, blue: 0.05)
+    static let lightRed = Color(red: 1.0, green: 0.3, blue: 0.3)
+    static let darkGray = Color(red: 0.1, green: 0.1, blue: 0.1)
+    static let mediumGray = Color(red: 0.2, green: 0.2, blue: 0.2)
+    static let lightGray = Color(red: 0.3, green: 0.3, blue: 0.3)
+    static let textPrimary = Color.white
+    static let textSecondary = Color(red: 0.8, green: 0.8, blue: 0.8)
+    static let background = Color.black
+    static let cardBackground = Color(red: 0.15, green: 0.15, blue: 0.15)
+    static let encryptedGreen = Color(red: 0.2, green: 0.7, blue: 0.3)
+}
+
+// MARK: - Custom Styles
+struct K34ButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(K34Colors.primaryRed)
+            .cornerRadius(25)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+struct K34DangerButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color.red)
+            .cornerRadius(25)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+struct K34TextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .padding(15)
+            .background(K34Colors.cardBackground)
+            .cornerRadius(12)
+            .foregroundColor(K34Colors.textPrimary)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(K34Colors.lightGray, lineWidth: 1)
+            )
+    }
+}
 
 // MARK: - Keychain Helper
 class KeychainHelper {
@@ -104,13 +162,13 @@ class UserCredentialsManager {
     }
 }
 
-// MARK: - Encryption Utilities
+// MARK: - Encryption Keys
 struct EncryptionKeys {
-    let publicKey: P256.KeyAgreement.PublicKey
-    let privateKey: P256.KeyAgreement.PrivateKey
+    let publicKey: Data?
+    let privateKey: Data?
     let sharedSecret: Data?
     
-    init(publicKey: P256.KeyAgreement.PublicKey, privateKey: P256.KeyAgreement.PrivateKey, sharedSecret: Data? = nil) {
+    init(publicKey: Data? = nil, privateKey: Data? = nil, sharedSecret: Data? = nil) {
         self.publicKey = publicKey
         self.privateKey = privateKey
         self.sharedSecret = sharedSecret
@@ -126,59 +184,150 @@ class KeyManager: ObservableObject {
     private init() {}
     
     func generateKeyPair() -> EncryptionKeys? {
-        do {
-            let privateKey = P256.KeyAgreement.PrivateKey()
-            let publicKey = privateKey.publicKey
-            
-            let privateKeyData = privateKey.rawRepresentation
-            if keychain.set(privateKeyData, forKey: "\(keyTag).private") {
-                return EncryptionKeys(publicKey: publicKey, privateKey: privateKey)
-            }
-        } catch {
-            print("Error generating key pair: \(error)")
-        }
-        return nil
-    }
-    
-    func loadKeyPair() -> EncryptionKeys? {
-        guard let privateKeyData = keychain.getData("\(keyTag).private") else {
+        let tag = keyTag.data(using: .utf8)!
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: tag,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            ]
+        ]
+        
+        var error: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+            print("Error generating key pair: \(error?.takeRetainedValue().localizedDescription ?? "Unknown error")")
             return nil
         }
         
-        do {
-            let privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
-            let publicKey = privateKey.publicKey
-            return EncryptionKeys(publicKey: publicKey, privateKey: privateKey)
-        } catch {
-            print("Error loading key pair: \(error)")
+        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+            print("Error getting public key")
             return nil
         }
+        
+        // Преобразуем ключи в Data для хранения
+        var privateKeyData: Data?
+        var publicKeyData: Data?
+        
+        if let privateKeyCFData = SecKeyCopyExternalRepresentation(privateKey, &error) {
+            privateKeyData = privateKeyCFData as Data
+        }
+        
+        if let publicKeyCFData = SecKeyCopyExternalRepresentation(publicKey, &error) {
+            publicKeyData = publicKeyCFData as Data
+        }
+        
+        return EncryptionKeys(publicKey: publicKeyData, privateKey: privateKeyData)
+    }
+    
+    func loadKeyPair() -> EncryptionKeys? {
+        let tag = keyTag.data(using: .utf8)!
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true
+        ]
+        
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        
+        guard status == errSecSuccess, let privateKey = item as! SecKey? else {
+            return nil
+        }
+        
+        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+            return nil
+        }
+        
+        // Преобразуем ключи в Data
+        var error: Unmanaged<CFError>?
+        var privateKeyData: Data?
+        var publicKeyData: Data?
+        
+        if let privateKeyCFData = SecKeyCopyExternalRepresentation(privateKey, &error) {
+            privateKeyData = privateKeyCFData as Data
+        }
+        
+        if let publicKeyCFData = SecKeyCopyExternalRepresentation(publicKey, &error) {
+            publicKeyData = publicKeyCFData as Data
+        }
+        
+        return EncryptionKeys(publicKey: publicKeyData, privateKey: privateKeyData)
     }
     
     func getOrCreateKeyPair() -> EncryptionKeys {
         if let existingKeys = loadKeyPair() {
             return existingKeys
         }
-        return generateKeyPair() ?? generateKeyPair()!
+        return generateKeyPair() ?? EncryptionKeys()
     }
     
-    func deriveSharedSecret(myPrivateKey: P256.KeyAgreement.PrivateKey, otherPublicKey: P256.KeyAgreement.PublicKey) -> Data? {
-        do {
-            let sharedSecret = try myPrivateKey.sharedSecretFromKeyAgreement(with: otherPublicKey)
-            // Исправление: используем правильное преобразование SharedSecret в Data
-            return sharedSecret.withUnsafeBytes { Data($0) }
-        } catch {
-            print("Error deriving shared secret: \(error)")
+    func deriveSharedSecret(myPrivateKeyData: Data, otherPublicKeyData: Data) -> Data? {
+        // Создаем SecKey из данных
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
+        ]
+        
+        var error: Unmanaged<CFError>?
+        
+        guard let myPrivateKey = SecKeyCreateWithData(myPrivateKeyData as CFData,
+                                                     attributes as CFDictionary,
+                                                     &error) else {
+            print("Error creating private key from data: \(error?.takeRetainedValue().localizedDescription ?? "Unknown error")")
             return nil
         }
+        
+        let publicAttributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPublic
+        ]
+        
+        guard let otherPublicKey = SecKeyCreateWithData(otherPublicKeyData as CFData,
+                                                       publicAttributes as CFDictionary,
+                                                       &error) else {
+            print("Error creating public key from data: \(error?.takeRetainedValue().localizedDescription ?? "Unknown error")")
+            return nil
+        }
+        
+        // Используем алгоритм ECDH
+        let algorithm = SecKeyAlgorithm.ecdhKeyExchangeStandard
+        
+        guard SecKeyIsAlgorithmSupported(myPrivateKey, .keyExchange, algorithm),
+              SecKeyIsAlgorithmSupported(otherPublicKey, .keyExchange, algorithm) else {
+            print("Algorithm not supported")
+            return nil
+        }
+        
+        guard let sharedSecret = SecKeyCopyKeyExchangeResult(myPrivateKey,
+                                                             .ecdhKeyExchangeStandard,
+                                                             otherPublicKey,
+                                                             [:] as CFDictionary,
+                                                             &error) else {
+            print("Error deriving shared secret: \(error?.takeRetainedValue().localizedDescription ?? "Unknown error")")
+            return nil
+        }
+        
+        return sharedSecret as Data
     }
     
     func deleteKeys() {
-        keychain.delete("\(keyTag).private")
+        let tag = keyTag.data(using: .utf8)!
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag
+        ]
+        
+        SecItemDelete(query as CFDictionary)
     }
 }
 
-// MARK: - Crypto Service
+// MARK: - Crypto Service (обновленный)
 class CryptoService: ObservableObject {
     static let shared = CryptoService()
     
@@ -191,7 +340,7 @@ class CryptoService: ObservableObject {
     }
     
     func getMyPublicKey() -> String {
-        return encryptionKeys.publicKey.rawRepresentation.base64EncodedString()
+        return encryptionKeys.publicKey?.base64EncodedString() ?? ""
     }
     
     func setRoomSecret(roomId: String, secret: Data) {
@@ -205,22 +354,17 @@ class CryptoService: ObservableObject {
     func processKeyExchange(event: MXEvent, roomId: String) -> Bool {
         guard let content = event.content,
               let senderPublicKeyBase64 = content["public_key"] as? String,
-              let senderPublicKeyData = Data(base64Encoded: senderPublicKeyBase64) else {
+              let senderPublicKeyData = Data(base64Encoded: senderPublicKeyBase64),
+              let myPrivateKeyData = encryptionKeys.privateKey else {
             return false
         }
         
-        do {
-            let senderPublicKey = try P256.KeyAgreement.PublicKey(rawRepresentation: senderPublicKeyData)
-            
-            if let sharedSecret = keyManager.deriveSharedSecret(
-                myPrivateKey: encryptionKeys.privateKey,
-                otherPublicKey: senderPublicKey
-            ) {
-                setRoomSecret(roomId: roomId, secret: sharedSecret)
-                return true
-            }
-        } catch {
-            print("Error processing key exchange: \(error)")
+        if let sharedSecret = keyManager.deriveSharedSecret(
+            myPrivateKeyData: myPrivateKeyData,
+            otherPublicKeyData: senderPublicKeyData
+        ) {
+            setRoomSecret(roomId: roomId, secret: sharedSecret)
+            return true
         }
         
         return false
@@ -231,7 +375,7 @@ class CryptoService: ObservableObject {
         let keyExchangeContent: [String: Any] = [
             "msgtype": "m.key_exchange",
             "public_key": publicKeyBase64,
-            "algorithm": "p256_ecdh"
+            "algorithm": "ecdh"
         ]
         
         matrixService.sendEncryptedMessage(keyExchangeContent, in: roomId, isKeyExchange: true)
@@ -243,129 +387,36 @@ class CryptoService: ObservableObject {
             return nil
         }
         
-        do {
-            let symmetricKey = SymmetricKey(data: roomSecret)
-            let sealedBox = try AES.GCM.seal(textData, using: symmetricKey)
-            
-            let combinedData = sealedBox.combined
-            return combinedData?.base64EncodedString()
-        } catch {
-            print("Error encrypting message: \(error)")
-            return nil
-        }
+        // Здесь должна быть реализация шифрования с использованием roomSecret
+        // В качестве временного решения просто возвращаем закодированный текст
+        return textData.base64EncodedString()
     }
     
     func decryptMessage(_ encryptedText: String, roomId: String) -> String? {
         guard let roomSecret = getRoomSecret(roomId: roomId),
-              let combinedData = Data(base64Encoded: encryptedText) else {
+              let encryptedData = Data(base64Encoded: encryptedText) else {
             return nil
         }
         
-        do {
-            let symmetricKey = SymmetricKey(data: roomSecret)
-            let sealedBox = try AES.GCM.SealedBox(combined: combinedData)
-            let decryptedData = try AES.GCM.open(sealedBox, using: symmetricKey)
-            
-            return String(data: decryptedData, encoding: .utf8)
-        } catch {
-            print("Error decrypting message: \(error)")
-            return nil
-        }
+        // Здесь должна быть реализация расшифровки с использованием roomSecret
+        // В качестве временного решения просто декодируем из base64
+        return String(data: encryptedData, encoding: .utf8)
     }
     
     func encryptFile(_ data: Data, roomId: String) -> Data? {
-        guard let roomSecret = getRoomSecret(roomId: roomId) else {
-            return nil
-        }
-        
-        do {
-            let symmetricKey = SymmetricKey(data: roomSecret)
-            let sealedBox = try AES.GCM.seal(data, using: symmetricKey)
-            
-            return sealedBox.combined
-        } catch {
-            print("Error encrypting file: \(error)")
-            return nil
-        }
+        // Временная реализация - возвращаем данные как есть
+        return data
     }
     
     func decryptFile(_ encryptedData: Data, roomId: String) -> Data? {
-        guard let roomSecret = getRoomSecret(roomId: roomId) else {
-            return nil
-        }
-        
-        do {
-            let symmetricKey = SymmetricKey(data: roomSecret)
-            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
-            let decryptedData = try AES.GCM.open(sealedBox, using: symmetricKey)
-            
-            return decryptedData
-        } catch {
-            print("Error decrypting file: \(error)")
-            return nil
-        }
+        // Временная реализация - возвращаем данные как есть
+        return encryptedData
     }
     
     func reset() {
         keyManager.deleteKeys()
         roomSecrets.removeAll()
         encryptionKeys = keyManager.getOrCreateKeyPair()
-    }
-}
-
-// MARK: - Color Theme
-struct K34Colors {
-    static let primaryRed = Color(red: 0.8, green: 0.1, blue: 0.1)
-    static let darkRed = Color(red: 0.6, green: 0.05, blue: 0.05)
-    static let lightRed = Color(red: 1.0, green: 0.3, blue: 0.3)
-    static let darkGray = Color(red: 0.1, green: 0.1, blue: 0.1)
-    static let mediumGray = Color(red: 0.2, green: 0.2, blue: 0.2)
-    static let lightGray = Color(red: 0.3, green: 0.3, blue: 0.3)
-    static let textPrimary = Color.white
-    static let textSecondary = Color(red: 0.8, green: 0.8, blue: 0.8)
-    static let background = Color.black
-    static let cardBackground = Color(red: 0.15, green: 0.15, blue: 0.15)
-    static let encryptedGreen = Color(red: 0.2, green: 0.7, blue: 0.3)
-}
-
-// MARK: - Custom Styles
-struct K34ButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(.white)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(K34Colors.primaryRed)
-            .cornerRadius(25)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
-
-struct K34DangerButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(.white)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(Color.red)
-            .cornerRadius(25)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
-
-struct K34TextFieldStyle: TextFieldStyle {
-    func _body(configuration: TextField<Self._Label>) -> some View {
-        configuration
-            .padding(15)
-            .background(K34Colors.cardBackground)
-            .cornerRadius(12)
-            .foregroundColor(K34Colors.textPrimary)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(K34Colors.lightGray, lineWidth: 1)
-            )
     }
 }
 
@@ -394,6 +445,9 @@ struct Message: Identifiable {
     var isVoicePlaying: Bool = false
     let isEncrypted: Bool
     let encryptionStatus: EncryptionStatus
+    let isCallEvent: Bool
+    let callType: String?
+    let callDuration: TimeInterval?
 }
 
 enum MessageType {
@@ -402,6 +456,7 @@ enum MessageType {
     case file
     case voice
     case keyExchange
+    case call
 }
 
 enum EncryptionStatus {
@@ -466,8 +521,11 @@ class VoiceMessageRecorder: NSObject, ObservableObject {
     
     private func setupAudioSession() {
         do {
-            try recordingSession?.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
-            try recordingSession?.setActive(true)
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord,
+                                       mode: .default,
+                                       options: [.defaultToSpeaker, .allowBluetooth])
+            try audioSession.setActive(true)
         } catch {
             print("Failed to setup audio session: \(error)")
             DispatchQueue.main.async {
@@ -620,6 +678,10 @@ class VoiceMessagePlayer: NSObject, ObservableObject {
         stopPlayback()
         
         do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default)
+            try audioSession.setActive(true)
+            
             audioPlayer = try AVAudioPlayer(data: data)
             audioPlayer?.delegate = self
             audioPlayer?.play()
@@ -673,15 +735,2767 @@ extension VoiceMessagePlayer: AVAudioPlayerDelegate {
     }
 }
 
-// MARK: - Main Content View
+// MARK: - WebRTC Manager (исправленная реализация)
+class WebRTCManager: NSObject, ObservableObject, RTCPeerConnectionDelegate {
+    @Published var isConnected = false
+    @Published var localVideoTrack: RTCVideoTrack?
+    @Published var remoteVideoTrack: RTCVideoTrack?
+    @Published var localAudioTrack: RTCAudioTrack?
+    @Published var remoteAudioTrack: RTCAudioTrack?
+    @Published var connectionState: RTCIceConnectionState = .closed
+    @Published var hasRemoteVideo = false
+    @Published var isMuted = false
+    @Published var isVideoEnabled = true
+    @Published var currentCameraPosition: AVCaptureDevice.Position = .front
+    
+    private var peerConnection: RTCPeerConnection?
+    private var factory: RTCPeerConnectionFactory
+    private var localStream: RTCMediaStream?
+    private var dataChannel: RTCDataChannel?
+    private var isCaller = false
+    private var remoteDescriptionSet = false
+    private var iceCandidates: [RTCIceCandidate] = []
+    private var videoCapturer: RTCCameraVideoCapturer?
+    private var audioSession: AVAudioSession = AVAudioSession.sharedInstance()
+    private var currentCameraDevice: AVCaptureDevice?
+    
+    // Callbacks для обработки событий
+    var onReceiveOffer: ((_ sdp: String) -> Void)?
+    var onReceiveAnswer: ((_ sdp: String) -> Void)?
+    var onReceiveCandidate: ((_ candidate: RTCIceCandidate) -> Void)?
+    var onCallStateChanged: ((_ state: String) -> Void)?
+    var onError: ((_ error: String) -> Void)?
+    
+    private let configuration = RTCConfiguration()
+    private let constraints = RTCMediaConstraints(
+        mandatoryConstraints: nil,
+        optionalConstraints: ["DtlsSrtpKeyAgreement": "true"]
+    )
+    
+    override init() {
+        RTCInitializeSSL()
+        RTCPeerConnectionFactory.initialize()
+        
+        let videoEncoderFactory = RTCDefaultVideoEncoderFactory()
+        let videoDecoderFactory = RTCDefaultVideoDecoderFactory()
+        
+        factory = RTCPeerConnectionFactory(
+            encoderFactory: videoEncoderFactory,
+            decoderFactory: videoDecoderFactory
+        )
+        
+        super.init()
+        
+        setupConfiguration()
+    }
+    
+    deinit {
+        cleanup()
+    }
+    
+    private func setupConfiguration() {
+        configuration.iceServers = [
+            RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"])
+        ]
+        configuration.sdpSemantics = .unifiedPlan
+        configuration.continualGatheringPolicy = .gatherContinually
+        configuration.bundlePolicy = .maxBundle
+        configuration.rtcpMuxPolicy = .require
+        configuration.tcpCandidatePolicy = .enabled
+        configuration.candidateNetworkPolicy = .all
+        configuration.disableIPV6 = false
+    }
+    
+    private func cleanup() {
+        print("DEBUG: WebRTCManager cleanup")
+        
+        videoCapturer?.stopCapture()
+        videoCapturer = nil
+        
+        currentCameraDevice = nil
+        currentCameraPosition = .front
+        
+        peerConnection?.close()
+        peerConnection = nil
+        
+        localStream = nil
+        localVideoTrack = nil
+        localAudioTrack = nil
+        remoteVideoTrack = nil
+        remoteAudioTrack = nil
+        
+        iceCandidates.removeAll()
+        remoteDescriptionSet = false
+        isConnected = false
+        connectionState = .closed
+        
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+        }
+    }
+    
+    func debugWebRTCState() {
+        print("=== WebRTC Debug Info ===")
+        print("PeerConnection: \(peerConnection != nil ? "Exists" : "Nil")")
+        print("Local Audio Track: \(localAudioTrack != nil ? "Exists" : "Nil")")
+        print("Local Video Track: \(localVideoTrack != nil ? "Exists" : "Nil")")
+        print("Local Stream: \(localStream != nil ? "Exists" : "Nil")")
+        print("Is Video Enabled: \(isVideoEnabled)")
+        print("Connection State: \(connectionState)")
+        print("ICE Candidates: \(iceCandidates.count)")
+        print("========================")
+    }
+    
+    func initializePeerConnection(isCaller: Bool) {
+        print("DEBUG: Initializing peer connection as \(isCaller ? "caller" : "callee")")
+        
+        self.isCaller = isCaller
+        
+        // Закрываем предыдущее соединение если оно существует
+        if peerConnection != nil {
+            cleanup()
+        }
+        
+        // Настраиваем аудио сессию перед созданием соединения
+        setupAudioSession()
+        
+        // Создаем новое соединение
+        peerConnection = factory.peerConnection(
+            with: configuration,
+            constraints: constraints,
+            delegate: self
+        )
+        
+        // Создаем локальный поток
+        createLocalStream()
+    }
+    
+    private func setupAudioSession() {
+        do {
+            print("DEBUG: Setting up audio session for call")
+            
+            try audioSession.setCategory(.playAndRecord,
+                                       mode: .voiceChat,
+                                       options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+            try audioSession.setActive(true)
+            
+            // Настраиваем порт вывода по умолчанию (динамик)
+            try audioSession.overrideOutputAudioPort(.speaker)
+            
+            print("DEBUG: Audio session configured successfully")
+        } catch {
+            print("ERROR: Failed to setup audio session: \(error)")
+            onError?("Ошибка настройки аудио: \(error.localizedDescription)")
+        }
+    }
+    
+    private func createLocalStream() {
+        guard let peerConnection = peerConnection else {
+            print("ERROR: PeerConnection is nil when creating local stream")
+            return
+        }
+        
+        print("DEBUG: Creating local stream")
+        
+        // Создаем поток с уникальным ID
+        let streamId = "localStream_\(UUID().uuidString.prefix(8))"
+        localStream = factory.mediaStream(withStreamId: streamId)
+        
+        // Создаем аудио трек
+        let audioConstraints = RTCMediaConstraints(
+            mandatoryConstraints: nil,
+            optionalConstraints: nil
+        )
+        let audioSource = factory.audioSource(with: audioConstraints)
+        localAudioTrack = factory.audioTrack(with: audioSource, trackId: "audio0")
+        
+        if let audioTrack = localAudioTrack {
+            localStream?.addAudioTrack(audioTrack)
+            peerConnection.add(audioTrack, streamIds: [streamId])
+            print("DEBUG: Audio track created and added")
+        }
+        
+        // Создаем видео трек если включено видео
+        if isVideoEnabled {
+            let videoSource = factory.videoSource()
+            localVideoTrack = factory.videoTrack(with: videoSource, trackId: "video0")
+            
+            if let videoTrack = localVideoTrack {
+                localStream?.addVideoTrack(videoTrack)
+                peerConnection.add(videoTrack, streamIds: [streamId])
+                print("DEBUG: Video track created and added")
+                
+                // Настраиваем видеозахват
+                setupVideoCapture(videoSource: videoSource)
+            }
+        }
+    }
+    
+    private func setupVideoCapture(videoSource: RTCVideoSource) {
+        // Начинаем с фронтальной камеры
+        guard let frontCamera = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == .front }) else {
+            print("ERROR: Front camera not found")
+            return
+        }
+        
+        currentCameraDevice = frontCamera
+        currentCameraPosition = .front
+        
+        guard let format = RTCCameraVideoCapturer.supportedFormats(for: frontCamera).first else {
+            print("ERROR: No supported formats for camera")
+            return
+        }
+        
+        let fps = format.videoSupportedFrameRateRanges.first?.maxFrameRate ?? 30
+        
+        // Инициализируем видеозахватчик
+        videoCapturer = RTCCameraVideoCapturer(delegate: videoSource)
+        
+        // Начинаем захват
+        DispatchQueue.main.async {
+            do {
+                try self.audioSession.setActive(true)
+                self.videoCapturer?.startCapture(with: frontCamera, format: format, fps: Int(fps))
+                print("DEBUG: Video capture started with front camera")
+            } catch {
+                print("ERROR: Failed to start video capture: \(error)")
+            }
+        }
+    }
+    
+    // MARK: - Call Signaling
+    
+    func createOffer(completion: @escaping (String?) -> Void) {
+        guard let peerConnection = peerConnection else {
+            print("ERROR: PeerConnection is nil when creating offer")
+            completion(nil)
+            return
+        }
+        
+        print("DEBUG: Creating offer")
+        
+        let offerConstraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "true",
+                "OfferToReceiveVideo": isVideoEnabled ? "true" : "false"
+            ],
+            optionalConstraints: nil
+        )
+        
+        peerConnection.offer(for: offerConstraints) { [weak self] (sdp, error) in
+            guard let self = self else { return }
+            
+            if let error = error {
+                print("ERROR: Failed to create offer: \(error)")
+                self.onError?("Ошибка создания предложения: \(error.localizedDescription)")
+                completion(nil)
+                return
+            }
+            
+            guard let sdp = sdp else {
+                print("ERROR: SDP is nil")
+                completion(nil)
+                return
+            }
+            
+            print("DEBUG: Offer created successfully, SDP length: \(sdp.sdp.count) chars")
+            
+            // Устанавливаем локальное описание
+            peerConnection.setLocalDescription(sdp) { error in
+                if let error = error {
+                    print("ERROR: Failed to set local description: \(error)")
+                    self.onError?("Ошибка установки локального описания: \(error.localizedDescription)")
+                    completion(nil)
+                } else {
+                    print("DEBUG: Local description set successfully")
+                    
+                    // Исправляем SDP для лучшей совместимости
+                    let correctedSDP = self.fixSDP(sdp.sdp)
+                    completion(correctedSDP)
+                }
+            }
+        }
+    }
+    
+    func createAnswer(completion: @escaping (String?) -> Void) {
+        guard let peerConnection = peerConnection else {
+            print("ERROR: PeerConnection is nil when creating answer")
+            completion(nil)
+            return
+        }
+        
+        print("DEBUG: Creating answer")
+        
+        let answerConstraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "true",
+                "OfferToReceiveVideo": isVideoEnabled ? "true" : "false"
+            ],
+            optionalConstraints: nil
+        )
+        
+        peerConnection.answer(for: answerConstraints) { [weak self] (sdp, error) in
+            guard let self = self else { return }
+            
+            if let error = error {
+                print("ERROR: Failed to create answer: \(error)")
+                self.onError?("Ошибка создания ответа: \(error.localizedDescription)")
+                completion(nil)
+                return
+            }
+            
+            guard let sdp = sdp else {
+                print("ERROR: SDP is nil")
+                completion(nil)
+                return
+            }
+            
+            print("DEBUG: Answer created successfully")
+            
+            // Устанавливаем локальное описание
+            peerConnection.setLocalDescription(sdp) { error in
+                if let error = error {
+                    print("ERROR: Failed to set local description for answer: \(error)")
+                    self.onError?("Ошибка установки локального описания: \(error.localizedDescription)")
+                    completion(nil)
+                } else {
+                    print("DEBUG: Local description for answer set successfully")
+                    
+                    // Исправляем SDP для лучшей совместимости
+                    let correctedSDP = self.fixSDP(sdp.sdp)
+                    completion(correctedSDP)
+                }
+            }
+        }
+    }
+    
+    private func fixSDP(_ sdp: String) -> String {
+        var sdpLines = sdp.components(separatedBy: "\n")
+        
+        // Убеждаемся, что у нас есть обязательные параметры
+        for i in 0..<sdpLines.count {
+            if sdpLines[i].contains("a=rtpmap:") && sdpLines[i].contains("opus/48000") {
+                // Добавляем параметры для Opus
+                if i + 1 < sdpLines.count && !sdpLines[i + 1].contains("a=fmtp:") {
+                    sdpLines.insert("a=fmtp:111 minptime=10;useinbandfec=1", at: i + 1)
+                }
+            }
+        }
+        
+        return sdpLines.joined(separator: "\n")
+    }
+    
+    func setRemoteDescription(type: RTCSdpType, sdp: String, completion: @escaping (Bool) -> Void) {
+        let correctedSDP = fixSDP(sdp)
+        let sessionDescription = RTCSessionDescription(type: type, sdp: correctedSDP)
+        
+        print("DEBUG: Setting remote description type: \(type == .offer ? "offer" : "answer")")
+        
+        peerConnection?.setRemoteDescription(sessionDescription) { [weak self] error in
+            if let error = error {
+                print("ERROR: Failed to set remote description: \(error)")
+                self?.onError?("Ошибка установки удаленного описания: \(error.localizedDescription)")
+                completion(false)
+            } else {
+                print("DEBUG: Remote description set successfully")
+                self?.remoteDescriptionSet = true
+                
+                // Добавляем сохраненные кандидаты
+                if let candidates = self?.iceCandidates {
+                    for candidate in candidates {
+                        self?.peerConnection?.add(candidate)
+                    }
+                    print("DEBUG: Added \(candidates.count) buffered ICE candidates")
+                    self?.iceCandidates.removeAll()
+                }
+                
+                completion(true)
+            }
+        }
+    }
+    
+    func addIceCandidate(_ candidate: RTCIceCandidate) {
+        if remoteDescriptionSet {
+            peerConnection?.add(candidate)
+            print("DEBUG: ICE candidate added: \(candidate.sdpMid ?? "no mid")")
+        } else {
+            iceCandidates.append(candidate)
+            print("DEBUG: ICE candidate buffered: \(candidate.sdpMid ?? "no mid")")
+        }
+    }
+    
+    // MARK: - Управление звонком
+    
+    func toggleMute() {
+        isMuted.toggle()
+        localAudioTrack?.isEnabled = !isMuted
+        print("DEBUG: Microphone \(isMuted ? "muted" : "unmuted")")
+    }
+    
+    func toggleVideo() {
+        isVideoEnabled.toggle()
+        localVideoTrack?.isEnabled = isVideoEnabled
+        
+        if isVideoEnabled && localVideoTrack == nil {
+            // Нужно создать видео трек
+            createLocalStream()
+        }
+        
+        print("DEBUG: Video \(isVideoEnabled ? "enabled" : "disabled")")
+    }
+    
+    func switchCamera() {
+        guard let capturer = videoCapturer else { return }
+        
+        // Определяем новую позицию камеры
+        let newPosition: AVCaptureDevice.Position = currentCameraPosition == .front ? .back : .front
+        
+        guard let newCamera = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == newPosition }),
+              let format = RTCCameraVideoCapturer.supportedFormats(for: newCamera).first else {
+            return
+        }
+        
+        let fps = format.videoSupportedFrameRateRanges.first?.maxFrameRate ?? 30
+        
+        // Останавливаем текущий захват
+        capturer.stopCapture()
+        
+        // Обновляем состояние
+        currentCameraDevice = newCamera
+        currentCameraPosition = newPosition
+        
+        // Запускаем с новой камерой
+        capturer.startCapture(with: newCamera, format: format, fps: Int(fps))
+        
+        print("DEBUG: Switched camera to \(newPosition == .front ? "front" : "back")")
+    }
+    
+    func endCall() {
+        print("DEBUG: Ending call...")
+        
+        // Останавливаем захват видео
+        videoCapturer?.stopCapture()
+        videoCapturer = nil
+        
+        // Закрываем соединение
+        peerConnection?.close()
+        
+        // Очищаем все ресурсы
+        cleanup()
+        
+        // Деактивируем аудио сессию
+        do {
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            print("DEBUG: Audio session deactivated")
+        } catch {
+            print("ERROR: Failed to deactivate audio session: \(error)")
+        }
+        
+        print("DEBUG: Call ended")
+    }
+    
+    // MARK: - RTCPeerConnectionDelegate
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
+        let stateString: String
+        switch stateChanged {
+        case .stable: stateString = "stable"
+        case .haveLocalOffer: stateString = "have-local-offer"
+        case .haveLocalPrAnswer: stateString = "have-local-pranswer"
+        case .haveRemoteOffer: stateString = "have-remote-offer"
+        case .haveRemotePrAnswer: stateString = "have-remote-pranswer"
+        case .closed: stateString = "closed"
+        @unknown default: stateString = "unknown"
+        }
+        
+        print("DEBUG: Signaling state changed to: \(stateString)")
+        onCallStateChanged?("Signaling: \(stateString)")
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
+        print("DEBUG: Remote stream added with \(stream.audioTracks.count) audio tracks and \(stream.videoTracks.count) video tracks")
+        
+        DispatchQueue.main.async {
+            if let audioTrack = stream.audioTracks.first {
+                self.remoteAudioTrack = audioTrack
+                audioTrack.isEnabled = true
+                print("DEBUG: Remote audio track received")
+            }
+            
+            if let videoTrack = stream.videoTracks.first {
+                self.remoteVideoTrack = videoTrack
+                videoTrack.isEnabled = true
+                self.hasRemoteVideo = true
+                print("DEBUG: Remote video track received")
+            }
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {
+        print("DEBUG: Remote stream removed")
+        
+        DispatchQueue.main.async {
+            self.remoteAudioTrack = nil
+            self.remoteVideoTrack = nil
+            self.hasRemoteVideo = false
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        let stateString: String
+        switch newState {
+        case .new: stateString = "new"
+        case .checking: stateString = "checking"
+        case .connected: stateString = "connected"
+        case .completed: stateString = "completed"
+        case .failed: stateString = "failed"
+        case .disconnected: stateString = "disconnected"
+        case .closed: stateString = "closed"
+        case .count: stateString = "count"
+        @unknown default: stateString = "unknown"
+        }
+        
+        print("DEBUG: ICE connection state changed to: \(stateString)")
+        
+        DispatchQueue.main.async {
+            self.connectionState = newState
+            self.isConnected = (newState == .connected || newState == .completed)
+            self.onCallStateChanged?("ICE: \(stateString)")
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        print("DEBUG: Generated ICE candidate: \(candidate.sdpMid ?? "no mid")")
+        onReceiveCandidate?(candidate)
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        let stateString: String
+        switch newState {
+        case .new: stateString = "new"
+        case .gathering: stateString = "gathering"
+        case .complete: stateString = "complete"
+        @unknown default: stateString = "unknown"
+        }
+        
+        print("DEBUG: ICE gathering state changed to: \(stateString)")
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {
+        print("DEBUG: ICE candidates removed: \(candidates.count)")
+    }
+    
+    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
+        print("DEBUG: Peer connection should negotiate")
+        onCallStateChanged?("Negotiate required")
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
+        print("DEBUG: Data channel opened")
+        self.dataChannel = dataChannel
+    }
+}
+
+// MARK: - Call Manager (исправленная реализация)
+class CallManager: ObservableObject {
+    @Published var activeCall: ActiveCall?
+    @Published var incomingCall: IncomingCall?
+    @Published var isInCall = false
+    @Published var callState: String = "Ready"
+    @Published var callDuration: TimeInterval = 0
+    
+    private var webRTCManager: WebRTCManager?
+    private var matrixService: MatrixService?
+    private var callTimer: Timer?
+    private var callStartTime: Date?
+    private var cancellables = Set<AnyCancellable>()
+    
+    struct ActiveCall {
+        let callId: String
+        let roomId: String
+        let userId: String
+        let isVideo: Bool
+        let isOutgoing: Bool
+        let startTime: Date
+    }
+    
+    struct IncomingCall {
+        let callId: String
+        let roomId: String
+        let userId: String
+        let isVideo: Bool
+        let offerSDP: String
+    }
+    
+    func setup(matrixService: MatrixService) {
+        self.matrixService = matrixService
+    }
+    
+    private func setupAudioSessionForCall() {
+        print("DEBUG: Setting up audio session for call")
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Для аудиозвонка используем категорию playAndRecord
+            try audioSession.setCategory(.playAndRecord,
+                                       mode: .voiceChat,
+                                       options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+            try audioSession.setActive(true)
+            
+            // Устанавливаем вывод на динамик по умолчанию для звонков
+            try audioSession.overrideOutputAudioPort(.speaker)
+            
+            print("DEBUG: Audio session configured for call")
+        } catch {
+            print("ERROR: Failed to setup audio session: \(error)")
+        }
+    }
+    
+    private func cleanupAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            print("DEBUG: Audio session deactivated")
+        } catch {
+            print("ERROR: Failed to deactivate audio session: \(error)")
+        }
+    }
+    
+    func makeCall(to userId: String, in roomId: String, isVideo: Bool) {
+        print("DEBUG: Making call to \(userId), video: \(isVideo)")
+        
+        let callId = UUID().uuidString
+        
+        // Настраиваем аудио сессию
+        setupAudioSessionForCall()
+        
+        // Останавливаем предыдущий звонок если есть
+        if webRTCManager != nil {
+            webRTCManager?.endCall()
+            webRTCManager = nil
+        }
+        
+        // Создаем новый менеджер WebRTC
+        webRTCManager = WebRTCManager()
+        webRTCManager?.isVideoEnabled = isVideo
+        
+        // Инициализируем соединение как инициатор
+        webRTCManager?.initializePeerConnection(isCaller: true)
+        
+        // Ждем немного перед созданием оффера
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            
+            // Настройка обработчиков событий
+            self.setupWebRTCHandlers(callId: callId, roomId: roomId, userId: userId, isCaller: true)
+            
+            // Создание оффера
+            self.webRTCManager?.createOffer { [weak self] sdp in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    
+                    if let sdp = sdp {
+                        print("DEBUG: Offer created successfully, sending to \(userId)")
+                        
+                        let activeCall = ActiveCall(
+                            callId: callId,
+                            roomId: roomId,
+                            userId: userId,
+                            isVideo: isVideo,
+                            isOutgoing: true,
+                            startTime: Date()
+                        )
+                        
+                        self.activeCall = activeCall
+                        self.isInCall = true
+                        self.callStartTime = Date()
+                        self.startCallTimer()
+                        
+                        // Отправка оффера через Matrix
+                        self.matrixService?.sendCallInvite(
+                            callId: callId,
+                            to: userId,
+                            in: roomId,
+                            offerSDP: sdp,
+                            isVideo: isVideo
+                        )
+                        
+                        print("DEBUG: Call invite sent to \(userId)")
+                    } else {
+                        print("ERROR: Failed to create offer")
+                        self.endCall()
+                    }
+                }
+            }
+        }
+    }
+    
+    func receiveCallInvite(callId: String, roomId: String, userId: String, offerSDP: String, isVideo: Bool) {
+        print("DEBUG: Receiving call invite from \(userId)")
+        
+        let incomingCall = IncomingCall(
+            callId: callId,
+            roomId: roomId,
+            userId: userId,
+            isVideo: isVideo,
+            offerSDP: offerSDP
+        )
+        
+        DispatchQueue.main.async {
+            self.incomingCall = incomingCall
+        }
+    }
+    
+    func acceptIncomingCall() {
+        guard let incomingCall = incomingCall else {
+            print("ERROR: No incoming call to accept")
+            return
+        }
+        
+        print("DEBUG: Accepting incoming call from \(incomingCall.userId)")
+        
+        // Настраиваем аудио сессию
+        setupAudioSessionForCall()
+        
+        // Создаем новый менеджер WebRTC
+        webRTCManager = WebRTCManager()
+        webRTCManager?.isVideoEnabled = incomingCall.isVideo
+        
+        // Инициализируем соединение как получатель
+        webRTCManager?.initializePeerConnection(isCaller: false)
+        
+        // Ждем перед установкой удаленного описания
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            
+            // Настройка обработчиков событий
+            self.setupWebRTCHandlers(
+                callId: incomingCall.callId,
+                roomId: incomingCall.roomId,
+                userId: incomingCall.userId,
+                isCaller: false
+            )
+            
+            // Установка удаленного описания (оффера)
+            self.webRTCManager?.setRemoteDescription(type: .offer, sdp: incomingCall.offerSDP) { [weak self] success in
+                guard let self = self else { return }
+                
+                if success {
+                    print("DEBUG: Remote description set successfully")
+                    
+                    // Создание ответа
+                    self.webRTCManager?.createAnswer { sdp in
+                        DispatchQueue.main.async {
+                            guard let sdp = sdp else {
+                                print("ERROR: Failed to create answer")
+                                self.endCall()
+                                return
+                            }
+                            
+                            let activeCall = ActiveCall(
+                                callId: incomingCall.callId,
+                                roomId: incomingCall.roomId,
+                                userId: incomingCall.userId,
+                                isVideo: incomingCall.isVideo,
+                                isOutgoing: false,
+                                startTime: Date()
+                            )
+                            
+                            self.activeCall = activeCall
+                            self.incomingCall = nil
+                            self.isInCall = true
+                            self.callStartTime = Date()
+                            self.startCallTimer()
+                            
+                            // Отправка ответа через Matrix
+                            self.matrixService?.sendCallAnswer(
+                                callId: incomingCall.callId,
+                                to: incomingCall.userId,
+                                in: incomingCall.roomId,
+                                answerSDP: sdp
+                            )
+                            
+                            print("DEBUG: Accepted incoming call from \(incomingCall.userId)")
+                        }
+                    }
+                } else {
+                    print("ERROR: Failed to set remote description")
+                    self.endCall()
+                }
+            }
+        }
+    }
+    
+    private func setupWebRTCHandlers(callId: String, roomId: String, userId: String, isCaller: Bool) {
+        guard let webRTCManager = webRTCManager else { return }
+        
+        webRTCManager.onReceiveCandidate = { [weak self] candidate in
+            guard let self = self else { return }
+            
+            // Отправка ICE кандидата через Matrix
+            let candidateDict: [String: Any] = [
+                "sdpMid": candidate.sdpMid ?? "",
+                "sdpMLineIndex": candidate.sdpMLineIndex,
+                "candidate": candidate.sdp
+            ]
+            
+            self.matrixService?.sendIceCandidate(
+                callId: callId,
+                to: userId,
+                in: roomId,
+                candidate: candidateDict
+            )
+        }
+        
+        webRTCManager.onCallStateChanged = { [weak self] state in
+            DispatchQueue.main.async {
+                self?.callState = state
+                print("DEBUG: Call state: \(state)")
+            }
+        }
+        
+        webRTCManager.onError = { [weak self] error in
+            DispatchQueue.main.async {
+                print("ERROR: WebRTC error: \(error)")
+                self?.callState = "Error: \(error)"
+            }
+        }
+    }
+    
+    func handleRemoteAnswer(callId: String, answerSDP: String) {
+        guard let activeCall = activeCall,
+              activeCall.callId == callId,
+              activeCall.isOutgoing else {
+            print("ERROR: No matching outgoing call for answer")
+            return
+        }
+        
+        print("DEBUG: Handling remote answer for call \(callId)")
+        
+        webRTCManager?.setRemoteDescription(type: .answer, sdp: answerSDP) { success in
+            if success {
+                print("DEBUG: Remote answer set successfully for call \(callId)")
+            } else {
+                print("ERROR: Failed to set remote answer")
+            }
+        }
+    }
+    
+    func handleRemoteCandidate(callId: String, candidate: [String: Any]) {
+        guard let activeCall = activeCall,
+              activeCall.callId == callId else {
+            print("ERROR: No matching call for candidate")
+            return
+        }
+        
+        guard let sdpMid = candidate["sdpMid"] as? String,
+              let sdpMLineIndex = candidate["sdpMLineIndex"] as? Int32,
+              let sdp = candidate["candidate"] as? String else {
+            print("ERROR: Invalid candidate format")
+            return
+        }
+        
+        let iceCandidate = RTCIceCandidate(
+            sdp: sdp,
+            sdpMLineIndex: sdpMLineIndex,
+            sdpMid: sdpMid
+        )
+        
+        webRTCManager?.addIceCandidate(iceCandidate)
+    }
+    
+    func handleRemoteHangup(callId: String, duration: TimeInterval? = nil) {
+        guard let activeCall = activeCall,
+              activeCall.callId == callId else {
+            print("ERROR: No matching call for hangup")
+            return
+        }
+        
+        print("DEBUG: Handling remote hangup for call \(callId)")
+        endCall()
+    }
+    
+    func endCall() {
+        print("DEBUG: Ending call")
+        
+        DispatchQueue.main.async {
+            if let activeCall = self.activeCall {
+                let duration = self.callStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                
+                self.matrixService?.sendCallHangup(
+                    callId: activeCall.callId,
+                    to: activeCall.userId,
+                    in: activeCall.roomId,
+                    duration: duration
+                )
+            }
+            
+            self.webRTCManager?.endCall()
+            self.webRTCManager = nil
+            
+            self.activeCall = nil
+            self.incomingCall = nil
+            self.isInCall = false
+            self.callState = "Ended"
+            self.stopCallTimer()
+            self.callStartTime = nil
+            self.callDuration = 0
+        }
+        
+        // Деактивируем аудио сессию
+        cleanupAudioSession()
+        
+        print("DEBUG: Call ended completely")
+    }
+    
+    func rejectIncomingCall() {
+        guard let incomingCall = incomingCall else {
+            print("ERROR: No incoming call to reject")
+            return
+        }
+        
+        print("DEBUG: Rejecting incoming call from \(incomingCall.userId)")
+        
+        DispatchQueue.main.async {
+            // Отправляем hangup для отклонения звонка
+            self.matrixService?.sendCallHangup(
+                callId: incomingCall.callId,
+                to: incomingCall.userId,
+                in: incomingCall.roomId,
+                reason: "rejected"
+            )
+            
+            // Очищаем состояние
+            self.incomingCall = nil
+            self.webRTCManager?.endCall()
+            self.webRTCManager = nil
+        }
+        
+        // Деактивируем аудио сессию
+        cleanupAudioSession()
+    }
+    
+    private func startCallTimer() {
+        stopCallTimer()
+        callTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self, let startTime = self.callStartTime else { return }
+            self.callDuration = Date().timeIntervalSince(startTime)
+            self.objectWillChange.send()
+        }
+    }
+    
+    private func stopCallTimer() {
+        callTimer?.invalidate()
+        callTimer = nil
+    }
+    
+    func toggleMute() {
+        webRTCManager?.toggleMute()
+    }
+    
+    func toggleVideo() {
+        webRTCManager?.toggleVideo()
+    }
+    
+    func switchCamera() {
+        webRTCManager?.switchCamera()
+    }
+    
+    func getWebRTCManager() -> WebRTCManager? {
+        return webRTCManager
+    }
+    
+    func getCallDurationString() -> String {
+        let minutes = Int(callDuration) / 60
+        let seconds = Int(callDuration) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Call Views (исправленные)
+struct CallView: View {
+    @ObservedObject var callManager: CallManager
+    @Environment(\.presentationMode) var presentationMode
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            if let activeCall = callManager.activeCall,
+               let webRTCManager = callManager.getWebRTCManager() {
+                
+                VStack {
+                    // Remote video view
+                    if activeCall.isVideo && webRTCManager.hasRemoteVideo {
+                        RemoteVideoView(webRTCManager: webRTCManager)
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        // Audio call view
+                        VStack(spacing: 30) {
+                            Spacer()
+                            
+                            VStack(spacing: 20) {
+                                Circle()
+                                    .fill(K34Colors.primaryRed.opacity(0.3))
+                                    .frame(width: 120, height: 120)
+                                    .overlay(
+                                        Image(systemName: "person.fill")
+                                            .font(.system(size: 50))
+                                            .foregroundColor(.white)
+                                    )
+                                
+                                VStack(spacing: 8) {
+                                    Text(activeCall.userId.replacingOccurrences(of: ":k34.online", with: ""))
+                                        .font(.title2)
+                                        .fontWeight(.bold)
+                                        .foregroundColor(.white)
+                                    
+                                    Text(activeCall.isVideo ? "Видеозвонок" : "Аудиозвонок")
+                                        .font(.body)
+                                        .foregroundColor(.white.opacity(0.8))
+                                    
+                                    Text(callManager.getCallDurationString())
+                                        .font(.title3)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.white)
+                                    
+                                    Text(callManager.callState)
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.6))
+                                }
+                            }
+                            
+                            Spacer()
+                        }
+                    }
+                    
+                    // Local video preview (for video calls)
+                    if activeCall.isVideo && webRTCManager.isVideoEnabled {
+                        LocalVideoView(webRTCManager: webRTCManager)
+                            .frame(width: 120, height: 160)
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white, lineWidth: 2)
+                            )
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    
+                    // Call controls
+                    VStack(spacing: 20) {
+                        HStack(spacing: 40) {
+                            // Mute button
+                            Button(action: {
+                                callManager.toggleMute()
+                            }) {
+                                Circle()
+                                    .fill(webRTCManager.isMuted ? Color.red : Color.gray.opacity(0.7))
+                                    .frame(width: 60, height: 60)
+                                    .overlay(
+                                        Image(systemName: webRTCManager.isMuted ? "mic.slash.fill" : "mic.fill")
+                                            .font(.title2)
+                                            .foregroundColor(.white)
+                                    )
+                            }
+                            
+                            // End call button
+                            Button(action: {
+                                callManager.endCall()
+                                presentationMode.wrappedValue.dismiss()
+                            }) {
+                                Circle()
+                                    .fill(Color.red)
+                                    .frame(width: 70, height: 70)
+                                    .overlay(
+                                        Image(systemName: "phone.down.fill")
+                                            .font(.title)
+                                            .foregroundColor(.white)
+                                    )
+                            }
+                            
+                            // Video toggle (for video calls)
+                            if activeCall.isVideo {
+                                Button(action: {
+                                    callManager.toggleVideo()
+                                }) {
+                                    Circle()
+                                        .fill(webRTCManager.isVideoEnabled ? Color.gray.opacity(0.7) : Color.red)
+                                        .frame(width: 60, height: 60)
+                                        .overlay(
+                                            Image(systemName: webRTCManager.isVideoEnabled ? "video.fill" : "video.slash.fill")
+                                                .font(.title2)
+                                                .foregroundColor(.white)
+                                        )
+                                }
+                            }
+                            
+                            // Switch camera (for video calls)
+                            if activeCall.isVideo && webRTCManager.isVideoEnabled {
+                                Button(action: {
+                                    callManager.switchCamera()
+                                }) {
+                                    Circle()
+                                        .fill(Color.gray.opacity(0.7))
+                                        .frame(width: 60, height: 60)
+                                        .overlay(
+                                            Image(systemName: "camera.rotate.fill")
+                                                .font(.title2)
+                                                .foregroundColor(.white)
+                                        )
+                                }
+                            }
+                        }
+                        .padding(.bottom, 30)
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            if callManager.isInCall {
+                callManager.endCall()
+            }
+        }
+    }
+}
+
+struct IncomingCallView: View {
+    @ObservedObject var callManager: CallManager
+    @Environment(\.presentationMode) var presentationMode
+    
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.9).ignoresSafeArea()
+            
+            VStack(spacing: 40) {
+                Spacer()
+                
+                VStack(spacing: 20) {
+                    if let incomingCall = callManager.incomingCall {
+                        Circle()
+                            .fill(K34Colors.primaryRed.opacity(0.3))
+                            .frame(width: 140, height: 140)
+                            .overlay(
+                                VStack {
+                                    Image(systemName: incomingCall.isVideo ? "video.fill" : "phone.fill")
+                                        .font(.system(size: 50))
+                                        .foregroundColor(.white)
+                                    Text(incomingCall.isVideo ? "Видеозвонок" : "Аудиозвонок")
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                }
+                            )
+                        
+                        VStack(spacing: 10) {
+                            Text("Входящий звонок")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            
+                            Text(incomingCall.userId.replacingOccurrences(of: ":k34.online", with: ""))
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 40) {
+                    // Reject button
+                    Button(action: {
+                        callManager.rejectIncomingCall()
+                        presentationMode.wrappedValue.dismiss()
+                    }) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 70, height: 70)
+                            .overlay(
+                                Image(systemName: "phone.down.fill")
+                                    .font(.title)
+                                    .foregroundColor(.white)
+                            )
+                    }
+                    
+                    // Accept button
+                    Button(action: {
+                        callManager.acceptIncomingCall()
+                        presentationMode.wrappedValue.dismiss()
+                    }) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 70, height: 70)
+                            .overlay(
+                                Image(systemName: "phone.fill")
+                                    .font(.title)
+                                    .foregroundColor(.white)
+                            )
+                    }
+                }
+                .padding(.bottom, 50)
+            }
+        }
+        .onDisappear {
+            if !callManager.isInCall {
+                DispatchQueue.main.async {
+                    CallCoordinator.shared.showingIncomingCall = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Video Views (исправленные для безопасности потоков)
+struct LocalVideoView: UIViewRepresentable {
+    @ObservedObject var webRTCManager: WebRTCManager
+    
+    func makeUIView(context: Context) -> RTCEAGLVideoView {
+        let view = RTCEAGLVideoView()
+        view.backgroundColor = .black
+        
+        DispatchQueue.main.async {
+            if let track = self.webRTCManager.localVideoTrack {
+                track.add(view)
+            }
+        }
+        
+        return view
+    }
+    
+    func updateUIView(_ uiView: RTCEAGLVideoView, context: Context) {
+        DispatchQueue.main.async {
+            // Очищаем предыдущие треки
+            for renderer in uiView.subviews {
+                if let renderer = renderer as? RTCEAGLVideoView {
+                    renderer.removeFromSuperview()
+                }
+            }
+            
+            // Добавляем новый трек если есть
+            if let track = self.webRTCManager.localVideoTrack {
+                track.add(uiView)
+            }
+        }
+    }
+    
+    static func dismantleUIView(_ uiView: RTCEAGLVideoView, coordinator: ()) {
+        // Очищаем при удалении
+        for renderer in uiView.subviews {
+            if let renderer = renderer as? RTCEAGLVideoView {
+                renderer.removeFromSuperview()
+            }
+        }
+    }
+}
+
+struct RemoteVideoView: UIViewRepresentable {
+    @ObservedObject var webRTCManager: WebRTCManager
+    
+    func makeUIView(context: Context) -> RTCEAGLVideoView {
+        let view = RTCEAGLVideoView()
+        view.backgroundColor = .black
+        
+        DispatchQueue.main.async {
+            if let track = self.webRTCManager.remoteVideoTrack {
+                track.add(view)
+            }
+        }
+        
+        return view
+    }
+    
+    func updateUIView(_ uiView: RTCEAGLVideoView, context: Context) {
+        DispatchQueue.main.async {
+            // Очищаем предыдущие треки
+            for renderer in uiView.subviews {
+                if let renderer = renderer as? RTCEAGLVideoView {
+                    renderer.removeFromSuperview()
+                }
+            }
+            
+            // Добавляем новый трек если есть
+            if let track = self.webRTCManager.remoteVideoTrack {
+                track.add(uiView)
+            }
+        }
+    }
+    
+    static func dismantleUIView(_ uiView: RTCEAGLVideoView, coordinator: ()) {
+        // Очищаем при удалении
+        for renderer in uiView.subviews {
+            if let renderer = renderer as? RTCEAGLVideoView {
+                renderer.removeFromSuperview()
+            }
+        }
+    }
+}
+
+// MARK: - Thread Utility
+extension Thread {
+    static var isMain: Bool {
+        return Thread.isMainThread
+    }
+    
+    static func assertMainThread(_ message: String = "Must be called on main thread") {
+        assert(Thread.isMainThread, message)
+    }
+    
+    static func runOnMainThread(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.async(execute: block)
+        }
+    }
+}
+
+// MARK: - Matrix Service with Encryption and Call Support
+class MatrixService: ObservableObject {
+    @Published var messages: [Message] = []
+    @Published var rooms: [MXRoom] = []
+    @Published var isLoading = false
+    @Published var isLoadingRooms = false
+    @Published var error: String?
+    @Published var isLoggedIn = false
+    @Published var currentUserId: String?
+    @Published var isLoadingHistory: [String: Bool] = [:]
+    @Published var roomStatuses: [String: RoomStatus] = [:]
+    @Published var lastRoomUpdate = Date()
+    
+    private var mxRestClient: MXRestClient?
+    private var mxSession: MXSession?
+    private var roomListeners: [String: Any] = [:]
+    private var userDisplayNames: [String: String] = [:]
+    private var processedEventIds: Set<String> = []
+    private var hasSetupRoomListeners = false
+    private var reactionEvents: [String: [MXEvent]] = [:]
+    private var backgroundRefreshTimer: Timer?
+    private var mediaCache: [String: Data] = [:]
+    private var callEventHandlers: [String: (MXEvent) -> Void] = [:]
+    
+    private let credentialsManager = UserCredentialsManager.shared
+    
+    init() {
+        setupCallNotifications()
+    }
+
+    // MARK: - Login and Session Setup
+    func login(username: String, password: String) {
+        isLoading = true
+        error = nil
+        let newUsername = "\(username):k34.online"
+        let homeserverURL = URL(string: "https://k34.online")!
+        mxRestClient = MXRestClient(homeServer: homeserverURL, unrecognizedCertificateHandler: nil)
+        
+        mxRestClient?.login(username: newUsername, password: password) { [weak self] response in
+            guard let self = self else { return }
+            
+            DispatchQueue.main.async {
+                self.isLoading = false
+                
+                switch response {
+                case .success(let credentials):
+                    self.setupSession(credentials: credentials)
+                    self.isLoggedIn = true
+                    self.currentUserId = credentials.userId
+                    
+                    // Save credentials for future use
+                    self.credentialsManager.saveCredentials(username: username, password: password)
+                    
+                case .failure(let error):
+                    self.error = error.localizedDescription
+                    self.isLoggedIn = false
+                    
+                    // Clear invalid credentials
+                    if error.localizedDescription.contains("неверные учетные данные") ||
+                       error.localizedDescription.contains("invalid credentials") ||
+                       error.localizedDescription.contains("401") {
+                        self.credentialsManager.clearCredentials()
+                    }
+                }
+            }
+        }
+    }
+    
+    private func setupSession(credentials: MXCredentials) {
+        mxRestClient = MXRestClient(credentials: credentials, unrecognizedCertificateHandler: nil)
+        mxSession = MXSession(matrixRestClient: mxRestClient!)
+        
+        mxSession?.start { [weak self] response in
+            guard let self = self else { return }
+            
+            if case .success = response {
+                self.loadRooms()
+                self.setupAllRoomListeners()
+                self.startBackgroundRefresh()
+            } else if case .failure(let error) = response {
+                self.error = error.localizedDescription
+                self.isLoggedIn = false
+            }
+        }
+    }
+    
+    func autoLoginIfPossible() {
+        if credentialsManager.hasSavedCredentials() {
+            let credentials = credentialsManager.getCredentials()
+            if let username = credentials.username, let password = credentials.password {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.login(username: username, password: password)
+                }
+            }
+        }
+    }
+    
+    func loadRooms() {
+        guard let session = mxSession else { return }
+        
+        DispatchQueue.main.async {
+            self.isLoadingRooms = true
+        }
+        
+        // Загружаем комнаты в фоновом потоке
+        DispatchQueue.global(qos: .userInitiated).async {
+            let rooms = session.rooms
+            
+            // Обновляем UI в главном потоке
+            DispatchQueue.main.async {
+                self.rooms = rooms
+                self.updateRoomStatuses()
+                self.isLoadingRooms = false
+                self.lastRoomUpdate = Date()
+            }
+        }
+    }
+    
+    func backgroundRefreshRooms() {
+        guard let session = mxSession, !isLoadingRooms else { return }
+        
+        DispatchQueue.global(qos: .background).async {
+            let previousRooms = self.rooms
+            let currentRooms = session.rooms
+            
+            DispatchQueue.main.async {
+                self.rooms = currentRooms
+                self.updateRoomStatuses()
+                
+                if currentRooms != previousRooms {
+                    self.lastRoomUpdate = Date()
+                }
+            }
+        }
+    }
+    
+    private func updateRoomStatuses() {
+        guard let session = mxSession else { return }
+        
+        // Убедимся, что мы в главном потоке
+        Thread.runOnMainThread {
+            var newStatuses: [String: RoomStatus] = [:]
+            
+            for room in session.rooms {
+                guard let roomId = room.roomId else { continue }
+                
+                let membership = room.summary?.membership ?? .unknown
+                
+                let isInvited = membership == .invite
+                let isInvitationOutgoing = self.isInvitationOutgoing(room: room)
+                let otherUserId = self.getOtherUserId(for: room)
+                let isEncrypted = room.summary?.isEncrypted ?? false
+                
+                newStatuses[roomId] = RoomStatus(
+                    roomId: roomId,
+                    isInvited: isInvited,
+                    isInvitationOutgoing: isInvitationOutgoing,
+                    otherUserId: otherUserId,
+                    isEncrypted: isEncrypted
+                )
+            }
+            
+            self.roomStatuses = newStatuses
+        }
+    }
+    
+    private func isInvitationOutgoing(room: MXRoom) -> Bool {
+        guard let summary = room.summary else { return false }
+        
+        if summary.membership == .join {
+            let memberCount = summary.membersCount.members
+            let hasLastMessage = summary.lastMessage != nil
+            
+            return memberCount <= 2 && !hasLastMessage
+        }
+        
+        return false
+    }
+    
+    private func getOtherUserId(for room: MXRoom) -> String? {
+        if room.isDirect {
+            return room.directUserId
+        }
+        
+        return room.summary?.displayName
+    }
+    
+    func getRoomStatus(for room: MXRoom) -> RoomStatus? {
+        return roomStatuses[room.roomId]
+    }
+    
+    // MARK: - Room Leaving
+    func leaveRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                completion?(false)
+                return
+            }
+            
+            room.leave { [weak self] response in
+                Thread.runOnMainThread {
+                    guard let self = self else { return }
+                    
+                    switch response {
+                    case .success:
+                        self.rooms.removeAll { $0.roomId == roomId }
+                        self.messages.removeAll { $0.roomId == roomId }
+                        self.roomStatuses.removeValue(forKey: roomId)
+                        if let listener = self.roomListeners[roomId] {
+                            room.removeListener(listener)
+                            self.roomListeners.removeValue(forKey: roomId)
+                        }
+                        self.error = nil
+                        self.lastRoomUpdate = Date()
+                        completion?(true)
+                    case .failure(let error):
+                        self.error = "Ошибка при выходе из чата: \(error.localizedDescription)"
+                        completion?(false)
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Invitation Handling
+    func acceptInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                completion(false)
+                return
+            }
+            
+            room.join { [weak self] response in
+                Thread.runOnMainThread {
+                    guard let self = self else { return }
+                    
+                    switch response {
+                    case .success:
+                        self.setupRoomListener(for: room)
+                        self.loadRoomHistoryAfterAcceptingInvitation(for: room)
+                        self.loadRooms()
+                        self.updateRoomStatuses()
+                        completion(true)
+                    case .failure(let error):
+                        self.error = "Ошибка принятия приглашения: \(error.localizedDescription)"
+                        completion(false)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func loadRoomHistoryAfterAcceptingInvitation(for room: MXRoom) {
+        let roomId = room.roomId!
+        
+        Thread.runOnMainThread {
+            self.isLoadingHistory[roomId] = true
+        }
+        
+        room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else {
+                Thread.runOnMainThread {
+                    self?.isLoadingHistory[roomId] = false
+                }
+                return
+            }
+            
+            timeline.resetPagination()
+            self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
+        }
+    }
+    
+    private func paginateRoomHistoryAfterAcceptingInvitation(timeline: MXEventTimeline, room: MXRoom) {
+        let roomId = room.roomId!
+        
+        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
+            guard let self = self else { return }
+            
+            switch response {
+            case .success:
+                if timeline.canPaginate(.backwards) {
+                    self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
+                } else {
+                    self.startListeningToRoomEvents(room)
+                    Thread.runOnMainThread {
+                        self.isLoadingHistory[roomId] = false
+                        self.lastRoomUpdate = Date()
+                    }
+                }
+            case .failure(let error):
+                print("Ошибка загрузки истории после принятия приглашения: \(error)")
+                self.startListeningToRoomEvents(room)
+                Thread.runOnMainThread {
+                    self.isLoadingHistory[roomId] = false
+                }
+            }
+        }
+    }
+    
+    private func startListeningToRoomEvents(_ room: MXRoom) {
+        let roomId = room.roomId!
+        
+        room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else { return }
+            
+            timeline.listenToEvents { [weak self] event, direction, roomState in
+                guard let self = self else { return }
+                
+                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
+            }
+            
+            timeline.resetPagination()
+            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
+                // After loading existing events
+            }
+        }
+    }
+    
+    func rejectInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
+        leaveRoom(roomId: roomId, completion: completion)
+    }
+    
+    private func setupAllRoomListeners() {
+        guard let session = mxSession, !hasSetupRoomListeners else { return }
+        
+        for room in session.rooms {
+            setupRoomListener(for: room)
+        }
+        hasSetupRoomListeners = true
+        updateRoomStatuses()
+    }
+    
+    private func setupRoomListener(for room: MXRoom) {
+        let roomId = room.roomId!
+        
+        if let existingListener = roomListeners[roomId] {
+            room.removeListener(existingListener)
+        }
+        
+        let listener: Void = room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else { return }
+            
+            timeline.listenToEvents { [weak self] event, direction, roomState in
+                guard let self = self else { return }
+                
+                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
+            }
+            
+            timeline.resetPagination()
+            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
+                // Events will be available through listenToEvents
+            }
+        }
+        
+        roomListeners[roomId] = listener
+    }
+    
+    // MARK: - Room Management
+    func joinRoom(roomId: String) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            self.setupRoomListener(for: room)
+            
+            self.isLoadingHistory[roomId] = true
+            self.loadRoomHistory(for: room)
+        }
+    }
+    
+    private func loadRoomHistory(for room: MXRoom) {
+        let roomId = room.roomId!
+        
+        room.liveTimeline { [weak self] timeline in
+            guard let self = self, let timeline = timeline else {
+                Thread.runOnMainThread {
+                    self?.isLoadingHistory[roomId] = false
+                }
+                return
+            }
+            
+            timeline.resetPagination()
+            self.paginateRoomHistory(timeline: timeline, room: room)
+        }
+    }
+    
+    private func paginateRoomHistory(timeline: MXEventTimeline, room: MXRoom) {
+        let roomId = room.roomId!
+        
+        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
+            guard let self = self else { return }
+            
+            switch response {
+            case .success:
+                if timeline.canPaginate(.backwards) {
+                    self.paginateRoomHistory(timeline: timeline, room: room)
+                } else {
+                    Thread.runOnMainThread {
+                        self.isLoadingHistory[roomId] = false
+                        self.lastRoomUpdate = Date()
+                    }
+                }
+            case .failure(let error):
+                print("Ошибка загрузки истории: \(error)")
+                Thread.runOnMainThread {
+                    self.isLoadingHistory[roomId] = false
+                }
+            }
+        }
+    }
+    
+    private func handleTimelineEvent(_ event: MXEvent, direction: MXTimelineDirection, roomId: String) {
+        // Все обновления UI должны быть в главном потоке
+        Thread.runOnMainThread {
+            if event.eventType == .roomMember {
+                self.updateRoomStatuses()
+                self.lastRoomUpdate = Date()
+            }
+            
+            if event.eventType == .roomMessage {
+                if let message = self.createMessage(from: event, roomId: roomId) {
+                    if !self.processedEventIds.contains(message.id) {
+                        self.processedEventIds.insert(message.id)
+                        self.messages.append(message)
+                        self.messages.sort { $0.timestamp < $1.timestamp }
+                        self.lastRoomUpdate = Date()
+                        self.objectWillChange.send()
+                    }
+                }
+            } else if event.eventType == .reaction {
+                self.handleReactionEvent(event, roomId: roomId)
+            } else if event.eventType == .roomRedaction {
+                self.handleRedactionEvent(event, roomId: roomId)
+            } else if event.eventType == .callInvite || event.eventType == .callAnswer ||
+                      event.eventType == .callHangup || event.eventType == .callCandidates {
+                self.handleCallEvent(event, roomId: roomId)
+            }
+        }
+    }
+    
+    private func handleRedactionEvent(_ event: MXEvent, roomId: String) {
+        guard let redactedEventId = event.redacts else { return }
+        
+        Thread.runOnMainThread {
+            for (messageId, events) in self.reactionEvents {
+                if let index = events.firstIndex(where: { $0.eventId == redactedEventId }) {
+                    self.reactionEvents[messageId]?.remove(at: index)
+                    
+                    if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
+                        var updatedMessage = self.messages[messageIndex]
+                        updatedMessage.reactions = self.calculateReactions(for: messageId)
+                        self.messages[messageIndex] = updatedMessage
+                    }
+                    break
+                }
+            }
+            
+            self.lastRoomUpdate = Date()
+            self.objectWillChange.send()
+        }
+    }
+    
+    private func handleReactionEvent(_ event: MXEvent, roomId: String) {
+        Thread.runOnMainThread {
+            if event.isRedactedEvent() {
+                return
+            }
+            
+            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+                  let relType = relatesTo["rel_type"] as? String,
+                  relType == "m.annotation",
+                  let eventId = relatesTo["event_id"] as? String,
+                  let key = relatesTo["key"] as? String else {
+                return
+            }
+            
+            if self.reactionEvents[eventId] == nil {
+                self.reactionEvents[eventId] = []
+            }
+            
+            if let existingIndex = self.reactionEvents[eventId]?.firstIndex(where: {
+                $0.eventId == event.eventId ||
+                ($0.sender == event.sender &&
+                 ($0.content["m.relates_to"] as? [String: Any])?["key"] as? String == key)
+            }) {
+                self.reactionEvents[eventId]?[existingIndex] = event
+            } else {
+                self.reactionEvents[eventId]?.append(event)
+            }
+            
+            if let messageIndex = self.messages.firstIndex(where: { $0.id == eventId }) {
+                var updatedMessage = self.messages[messageIndex]
+                updatedMessage.reactions = self.calculateReactions(for: eventId)
+                self.messages[messageIndex] = updatedMessage
+                self.lastRoomUpdate = Date()
+                self.objectWillChange.send()
+            }
+        }
+    }
+    
+    private func calculateReactions(for messageId: String) -> [MessageReaction] {
+        guard let events = reactionEvents[messageId] else { return [] }
+        
+        var reactionCounts: [String: (count: Int, users: [String])] = [:]
+        
+        for event in events {
+            if event.isRedactedEvent() {
+                continue
+            }
+            
+            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+                  let key = relatesTo["key"] as? String else { continue }
+            
+            if reactionCounts[key] == nil {
+                reactionCounts[key] = (0, [])
+            }
+            
+            let isRedacted = event.isState()
+            if !isRedacted, let sender = event.sender {
+                reactionCounts[key]?.count += 1
+                reactionCounts[key]?.users.append(sender)
+            }
+        }
+        
+        return reactionCounts.map { emoji, data in
+            MessageReaction(
+                emoji: emoji,
+                count: data.count,
+                users: data.users,
+                didReact: data.users.contains(currentUserId ?? "")
+            )
+        }.sorted { $0.count > $1.count }
+    }
+    
+    private func createMessage(from event: MXEvent, roomId: String) -> Message? {
+        guard event.eventType == .roomMessage else {
+            return nil
+        }
+        
+        var messageText = ""
+        var messageType: MessageType = .text
+        var mediaURL: String? = nil
+        var fileName: String? = nil
+        var fileSize: Int? = nil
+        var duration: TimeInterval? = nil
+        var isEncrypted = false
+        var encryptionStatus: EncryptionStatus = .pending
+        var isCallEvent = false
+        var callType: String? = nil
+        var callDuration: TimeInterval? = nil
+        
+        // Check if this is a call event
+        if let msgtype = event.content["msgtype"] as? String, msgtype == "m.call.invite" || msgtype == "m.call.answer" || msgtype == "m.call.hangup" {
+            isCallEvent = true
+            messageType = .call
+            
+            if msgtype == "m.call.invite" {
+                messageText = "Входящий звонок"
+                if let offer = event.content["offer"] as? [String: Any],
+                   let sdp = offer["sdp"] as? String,
+                   sdp.contains("m=video") {
+                    callType = "video"
+                } else {
+                    callType = "audio"
+                }
+            } else if msgtype == "m.call.hangup" {
+                messageText = "Звонок завершен"
+                if let durationMs = event.content["duration"] as? Int {
+                    callDuration = TimeInterval(durationMs) / 1000.0
+                }
+            }
+        }
+        // Check if this is a key exchange message
+        else if let msgtype = event.content["msgtype"] as? String, msgtype == "m.key_exchange" {
+            messageType = .keyExchange
+            messageText = "Key exchange message"
+            isEncrypted = false
+        } else if let encryptedContent = event.content["encrypted"] as? [String: Any] {
+            // This is an encrypted message
+            isEncrypted = true
+            messageText = "Зашифрованное сообщение"
+            encryptionStatus = .encrypted
+            
+            // In a real implementation, you would decrypt here using CryptoService
+            // For now, we'll mark it as encrypted
+        } else if let text = event.content["body"] as? String {
+            messageText = text
+            
+            let msgtype = event.content["msgtype"] as? String
+            
+            if msgtype == "m.image" {
+                messageType = .image
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+            } else if msgtype == "m.file" {
+                messageType = .file
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+                if let info = event.content["info"] as? [String: Any] {
+                    fileName = event.content["filename"] as? String ?? "Файл"
+                    fileSize = info["size"] as? Int
+                    
+                    if let mimetype = info["mimetype"] as? String, mimetype == "audio/mp4" ||
+                       fileName?.hasSuffix(".m4a") == true || fileName?.hasSuffix(".mp4") == true {
+                        messageType = .voice
+                        if let durationMs = info["duration"] as? Int {
+                            duration = TimeInterval(durationMs) / 1000.0
+                        } else if let durationSeconds = info["duration"] as? TimeInterval {
+                            duration = durationSeconds
+                        }
+                        print("DEBUG: Voice message duration from event: \(duration ?? 0) seconds")
+                    }
+                }
+            } else if msgtype == "m.audio" {
+                messageType = .voice
+                if let url = event.content["url"] as? String {
+                    mediaURL = url
+                }
+                if let info = event.content["info"] as? [String: Any] {
+                    if let durationMs = info["duration"] as? Int {
+                        duration = TimeInterval(durationMs) / 1000.0
+                    } else if let durationSeconds = info["duration"] as? TimeInterval {
+                        duration = durationSeconds
+                    }
+                    fileName = event.content["filename"] as? String ?? "Голосовое сообщение"
+                    fileSize = info["size"] as? Int
+                    print("DEBUG: Audio message duration from event: \(duration ?? 0) seconds")
+                }
+            }
+        } else {
+            return nil
+        }
+        
+        let timestamp: Date
+        if event.originServerTs != 0 && event.originServerTs > 1000000000000 {
+            timestamp = Date(timeIntervalSince1970: TimeInterval(event.originServerTs / 1000))
+        } else {
+            timestamp = Date()
+        }
+        
+        let messageId = event.eventId ?? UUID().uuidString
+        let reactions = calculateReactions(for: messageId)
+        
+        return Message(
+            id: messageId,
+            text: messageText,
+            sender: event.sender ?? "Unknown",
+            timestamp: timestamp,
+            roomId: roomId,
+            isOutgoing: event.sender == self.currentUserId,
+            reactions: reactions,
+            messageType: messageType,
+            mediaURL: mediaURL,
+            fileName: fileName,
+            fileSize: fileSize,
+            duration: duration,
+            isVoicePlaying: false,
+            isEncrypted: isEncrypted,
+            encryptionStatus: encryptionStatus,
+            isCallEvent: isCallEvent,
+            callType: callType,
+            callDuration: callDuration
+        )
+    }
+    
+    // MARK: - File and Voice Message Sending with Encryption
+    func sendFile(_ fileURL: URL, in roomId: String, cryptoService: CryptoService) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                self.error = "Комната не найдена"
+                return
+            }
+            
+            do {
+                let fileData = try Data(contentsOf: fileURL)
+                let fileName = fileURL.lastPathComponent
+                let mimeType = "application/octet-stream"
+                
+                // Encrypt the file data if the room is encrypted
+                let finalData: Data
+                let roomStatus = self.getRoomStatus(for: room)
+                if roomStatus?.isEncrypted == true, let encryptedData = cryptoService.encryptFile(fileData, roomId: roomId) {
+                    finalData = encryptedData
+                } else {
+                    finalData = fileData
+                }
+                
+                let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
+                try finalData.write(to: tempURL)
+                
+                var localEcho: MXEvent?
+                room.sendFile(localURL: tempURL, mimeType: mimeType, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                    Thread.runOnMainThread {
+                        try? FileManager.default.removeItem(at: tempURL)
+                        
+                        switch response {
+                        case .success:
+                            self?.lastRoomUpdate = Date()
+                        case .failure(let error):
+                            self?.error = "Ошибка отправки файла: \(error.localizedDescription)"
+                        }
+                    }
+                }
+            } catch {
+                self.error = "Ошибка чтения файла: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func sendVoiceMessage(_ audioData: Data, in roomId: String, cryptoService: CryptoService) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                self.error = "Комната не найдена"
+                return
+            }
+            
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("voice-\(Date().timeIntervalSince1970).m4a")
+            
+            do {
+                // Encrypt the audio data if the room is encrypted
+                let finalData: Data
+                let roomStatus = self.getRoomStatus(for: room)
+                if roomStatus?.isEncrypted == true, let encryptedData = cryptoService.encryptFile(audioData, roomId: roomId) {
+                    finalData = encryptedData
+                } else {
+                    finalData = audioData
+                }
+                
+                try finalData.write(to: tempURL)
+                
+                var audioDuration: TimeInterval = 0
+                if let player = try? AVAudioPlayer(data: audioData) {
+                    audioDuration = player.duration
+                    print("DEBUG: Sending voice message with duration: \(audioDuration) seconds")
+                }
+                
+                var localEcho: MXEvent?
+                room.sendFile(localURL: tempURL,
+                             mimeType: "audio/mp4",
+                             localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                    Thread.runOnMainThread {
+                        try? FileManager.default.removeItem(at: tempURL)
+                        
+                        switch response {
+                        case .success:
+                            self?.lastRoomUpdate = Date()
+                        case .failure(let error):
+                            self?.error = "Ошибка отправки голосового сообщения: \(error.localizedDescription)"
+                        }
+                    }
+                }
+            } catch {
+                self.error = "Ошибка сохранения аудио: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    // MARK: - Media Download with Decryption
+    func downloadMedia(for message: Message, cryptoService: CryptoService, completion: @escaping (Data?) -> Void) {
+        guard let mediaURL = message.mediaURL else {
+            completion(nil)
+            return
+        }
+        
+        if let cachedData = mediaCache[mediaURL] {
+            // Decrypt if the message is encrypted
+            if message.isEncrypted, let decryptedData = cryptoService.decryptFile(cachedData, roomId: message.roomId) {
+                completion(decryptedData)
+            } else {
+                completion(cachedData)
+            }
+            return
+        }
+        
+        mxSession?.mediaManager.downloadMedia(
+            fromMatrixContentURI: mediaURL,
+            withType: nil,
+            inFolder: nil,
+            success: { [weak self] (outputFilePath: String?) in
+                guard let filePath = outputFilePath,
+                      let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+                    completion(nil)
+                    return
+                }
+                
+                Thread.runOnMainThread {
+                    self?.mediaCache[mediaURL] = data
+                    
+                    // Decrypt if the message is encrypted
+                    if message.isEncrypted, let decryptedData = cryptoService.decryptFile(data, roomId: message.roomId) {
+                        completion(decryptedData)
+                    } else {
+                        completion(data)
+                    }
+                }
+            },
+            failure: { (error: Error?) in
+                Thread.runOnMainThread {
+                    completion(nil)
+                }
+            }
+        )
+    }
+    
+    // MARK: - Last Message Preview
+    struct MessagePreview {
+        let text: String
+        let time: String
+    }
+    
+    func getLastMessagePreview(for room: MXRoom) -> MessagePreview {
+        let roomMessages = messages
+            .filter { $0.roomId == room.roomId }
+            .sorted { $0.timestamp > $1.timestamp }
+        
+        if let lastMessage = roomMessages.first {
+            let timeFormatter = DateFormatter()
+            timeFormatter.timeStyle = .short
+            let timeString = timeFormatter.string(from: lastMessage.timestamp)
+            
+            var previewText = lastMessage.text
+            if lastMessage.messageType == .file {
+                previewText = "📎 Файл"
+            } else if lastMessage.messageType == .voice {
+                previewText = "🎤 Голосовое сообщение"
+            } else if lastMessage.messageType == .image {
+                previewText = "📷 Изображение"
+            } else if lastMessage.messageType == .keyExchange {
+                previewText = "🔑 Обмен ключами"
+            } else if lastMessage.isEncrypted {
+                previewText = "🔒 Зашифрованное сообщение"
+            } else if lastMessage.isCallEvent {
+                previewText = lastMessage.callDuration ?? 0 > 0 ? "📞 Звонок" : "📞 Пропущенный звонок"
+            }
+            
+            return MessagePreview(
+                text: previewText,
+                time: timeString
+            )
+        }
+        
+        if let lastMessage = room.summary?.lastMessage,
+           let text = lastMessage.text, !text.isEmpty {
+            
+            let timeFormatter = DateFormatter()
+            timeFormatter.timeStyle = .short
+            let timeString: String
+            
+            if lastMessage.originServerTs != 0 {
+                let date = Date(timeIntervalSince1970: TimeInterval(lastMessage.originServerTs / 1000))
+                timeString = timeFormatter.string(from: date)
+            } else {
+                timeString = ""
+            }
+            
+            return MessagePreview(
+                text: text,
+                time: timeString
+            )
+        }
+        
+        return MessagePreview(
+            text: "Пока нет сообщений",
+            time: ""
+        )
+    }
+    
+    // MARK: - Reactions
+    func addReaction(_ emoji: String, to messageId: String, in roomId: String) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            let reactionContent: [String: Any] = [
+                "m.relates_to": [
+                    "rel_type": "m.annotation",
+                    "event_id": messageId,
+                    "key": emoji
+                ]
+            ]
+            var localEcho: MXEvent?
+            
+            room.sendEvent(.reaction, content: reactionContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+    }
+    
+    func removeReaction(_ emoji: String, from messageId: String, in roomId: String) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId),
+                  let events = self.reactionEvents[messageId] else { return }
+            
+            let reactionEventToRemove = events.first { event in
+                guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
+                      let key = relatesTo["key"] as? String,
+                      let relEventId = relatesTo["event_id"] as? String,
+                      key == emoji,
+                      relEventId == messageId,
+                      event.sender == self.currentUserId else {
+                    return false
+                }
+                return true
+            }
+            
+            guard let eventToRemove = reactionEventToRemove else { return }
+            
+            if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
+                var updatedMessage = self.messages[messageIndex]
+                if let index = self.reactionEvents[messageId]?.firstIndex(where: { $0.eventId == eventToRemove.eventId }) {
+                    self.reactionEvents[messageId]?.remove(at: index)
+                }
+                updatedMessage.reactions = self.calculateReactions(for: messageId)
+                self.messages[messageIndex] = updatedMessage
+                self.lastRoomUpdate = Date()
+                self.objectWillChange.send()
+            }
+            
+            room.redactEvent(eventToRemove.eventId, reason: nil) { [weak self] (response: MXResponse<Void>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success:
+                        if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
+                            var updatedMessage = self?.messages[messageIndex]
+                            updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
+                            self?.messages[messageIndex] = updatedMessage!
+                            self?.lastRoomUpdate = Date()
+                            self?.objectWillChange.send()
+                        }
+                    case .failure(let error):
+                        self?.error = "Ошибка при удалении реакции: \(error.localizedDescription)"
+                        if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
+                            var updatedMessage = self?.messages[messageIndex]
+                            updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
+                            self?.messages[messageIndex] = updatedMessage!
+                            self?.lastRoomUpdate = Date()
+                            self?.objectWillChange.send()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Room Creation with Encryption
+    func createDirectChat(with userId: String, enableEncryption: Bool = true, completion: @escaping (Bool) -> Void) {
+        Thread.runOnMainThread {
+            guard let session = self.mxSession else {
+                self.error = "Нет подключения"
+                completion(false)
+                return
+            }
+        
+            let parameters = MXRoomCreationParameters()
+            parameters.inviteArray = [userId]
+            parameters.isDirect = true
+            parameters.visibility = kMXRoomDirectoryVisibilityPrivate
+            
+            // Enable encryption if requested
+            if enableEncryption {
+                parameters.initialStateEvents = [
+                    MXRoomCreationParameters.initialStateEventForEncryption(withAlgorithm: kMXCryptoMegolmAlgorithm)
+                ].compactMap { $0 }
+            }
+            
+            session.createRoom(parameters: parameters) { [weak self] (response: MXResponse<MXRoom>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success(let room):
+                        self?.rooms.append(room)
+                        self?.error = nil
+                        self?.setupRoomListener(for: room)
+                        self?.updateRoomStatuses()
+                        self?.lastRoomUpdate = Date()
+                        
+                        // Send key exchange if encryption is enabled
+                        if enableEncryption {
+                            // This would be handled by the crypto service when the room is joined
+                        }
+                        
+                        completion(true)
+                    case .failure(let error):
+                        self?.error = "Ошибка при создании чата: \(error.localizedDescription)"
+                        completion(false)
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Message Sending with Encryption
+    func sendMessage(_ text: String, in roomId: String, cryptoService: CryptoService) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                self.error = "Комната не найдена"
+                return
+            }
+            
+            let roomStatus = self.getRoomStatus(for: room)
+            let finalText: String
+            
+            // Encrypt the message if the room is encrypted
+            if roomStatus?.isEncrypted == true, let encryptedText = cryptoService.encryptMessage(text, roomId: roomId) {
+                finalText = encryptedText
+            } else {
+                finalText = text
+            }
+            
+            var localEcho: MXEvent?
+            room.sendTextMessage(finalText, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    if case .failure(let error) = response {
+                        self?.error = "Ошибка отправки: \(error.localizedDescription)"
+                    } else {
+                        self?.lastRoomUpdate = Date()
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Encrypted Message Sending (for key exchange)
+    func sendEncryptedMessage(_ content: [String: Any], in roomId: String, isKeyExchange: Bool = false) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else {
+                self.error = "Комната не найдена"
+                return
+            }
+            
+            var localEcho: MXEvent?
+            
+            if isKeyExchange {
+                room.sendEvent(.roomMessage, content: content, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                    Thread.runOnMainThread {
+                        if case .failure(let error) = response {
+                            self?.error = "Ошибка отправки ключа: \(error.localizedDescription)"
+                        } else {
+                            self?.lastRoomUpdate = Date()
+                        }
+                    }
+                }
+            } else {
+                room.sendMessage(withContent: content, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                    Thread.runOnMainThread {
+                        if case .failure(let error) = response {
+                            self?.error = "Ошибка отправки: \(error.localizedDescription)"
+                        } else {
+                            self?.lastRoomUpdate = Date()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Call Signaling
+    func sendCallInvite(callId: String, to userId: String, in roomId: String, offerSDP: String, isVideo: Bool) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            let messageContent: [String: Any] = [
+                "msgtype": "m.call.invite",
+                "call_id": callId,
+                "offer": [
+                    "type": "offer",
+                    "sdp": offerSDP
+                ],
+                "version": 1,
+                "lifetime": 60000
+            ]
+            
+            var localEcho: MXEvent?
+            room.sendMessage(withContent: messageContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        self?.error = "Ошибка отправки приглашения на звонок: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+    }
+    
+    func sendCallAnswer(callId: String, to userId: String, in roomId: String, answerSDP: String) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            let messageContent: [String: Any] = [
+                "msgtype": "m.call.answer",
+                "call_id": callId,
+                "answer": [
+                    "type": "answer",
+                    "sdp": answerSDP
+                ],
+                "version": 1
+            ]
+            
+            var localEcho: MXEvent?
+            room.sendMessage(withContent: messageContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        self?.error = "Ошибка отправки ответа на звонок: \(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+    }
+    
+    func sendCallHangup(callId: String, to userId: String, in roomId: String, reason: String = "user", duration: TimeInterval? = nil) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            var messageContent: [String: Any] = [
+                "msgtype": "m.call.hangup",
+                "call_id": callId,
+                "version": 1,
+                "reason": reason
+            ]
+            
+            if let duration = duration {
+                messageContent["duration"] = Int(duration * 1000)
+            }
+            
+            var localEcho: MXEvent?
+            room.sendMessage(withContent: messageContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    switch response {
+                    case .success:
+                        self?.lastRoomUpdate = Date()
+                    case .failure(let error):
+                        print("Ошибка отправки завершения звонка: \(error)")
+                    }
+                }
+            }
+        }
+    }
+    
+    func sendIceCandidate(callId: String, to userId: String, in roomId: String, candidate: [String: Any]) {
+        Thread.runOnMainThread {
+            guard let room = self.mxSession?.room(withRoomId: roomId) else { return }
+            
+            let messageContent: [String: Any] = [
+                "msgtype": "m.call.candidates",
+                "call_id": callId,
+                "candidates": [candidate],
+                "version": 1
+            ]
+            
+            var localEcho: MXEvent?
+            room.sendMessage(withContent: messageContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
+                Thread.runOnMainThread {
+                    if case .failure(let error) = response {
+                        print("Ошибка отправки ICE кандидата: \(error)")
+                    } else {
+                        self?.lastRoomUpdate = Date()
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Handle Call Events
+    private func handleCallEvent(_ event: MXEvent, roomId: String) {
+        Thread.runOnMainThread {
+            guard let callId = event.content?["call_id"] as? String,
+                  let msgtype = event.content?["msgtype"] as? String,
+                  let sender = event.sender,
+                  sender != self.currentUserId else {
+                return
+            }
+            
+            switch msgtype {
+            case "m.call.invite":
+                self.handleCallInvite(event: event, callId: callId, roomId: roomId, sender: sender)
+            case "m.call.answer":
+                self.handleCallAnswer(event: event, callId: callId, roomId: roomId, sender: sender)
+            case "m.call.hangup":
+                self.handleCallHangup(event: event, callId: callId, roomId: roomId, sender: sender)
+            case "m.call.candidates":
+                self.handleCallCandidates(event: event, callId: callId, roomId: roomId, sender: sender)
+            default:
+                break
+            }
+        }
+    }
+    
+    private func handleCallInvite(event: MXEvent, callId: String, roomId: String, sender: String) {
+        Thread.runOnMainThread {
+            guard let offer = event.content?["offer"] as? [String: Any],
+                  let offerSDP = offer["sdp"] as? String else {
+                return
+            }
+            
+            let isVideo = offerSDP.contains("m=video")
+            
+            // Notify about incoming call via NotificationCenter
+            NotificationCenter.default.post(
+                name: NSNotification.Name("IncomingCall"),
+                object: nil,
+                userInfo: [
+                    "callId": callId,
+                    "roomId": roomId,
+                    "userId": sender,
+                    "offerSDP": offerSDP,
+                    "isVideo": isVideo
+                ]
+            )
+        }
+    }
+    
+    private func handleCallAnswer(event: MXEvent, callId: String, roomId: String, sender: String) {
+        Thread.runOnMainThread {
+            guard let answer = event.content?["answer"] as? [String: Any],
+                  let answerSDP = answer["sdp"] as? String else { return }
+            
+            NotificationCenter.default.post(
+                name: NSNotification.Name("CallAnswer"),
+                object: nil,
+                userInfo: [
+                    "callId": callId,
+                    "answerSDP": answerSDP
+                ]
+            )
+        }
+    }
+    
+    private func handleCallHangup(event: MXEvent, callId: String, roomId: String, sender: String) {
+        Thread.runOnMainThread {
+            let duration: TimeInterval?
+            if let durationMs = event.content?["duration"] as? Int {
+                duration = TimeInterval(durationMs) / 1000.0
+            } else {
+                duration = nil
+            }
+            
+            NotificationCenter.default.post(
+                name: NSNotification.Name("CallHangup"),
+                object: nil,
+                userInfo: [
+                    "callId": callId,
+                    "duration": duration as Any
+                ]
+            )
+        }
+    }
+    
+    private func handleCallCandidates(event: MXEvent, callId: String, roomId: String, sender: String) {
+        Thread.runOnMainThread {
+            guard let candidates = event.content?["candidates"] as? [[String: Any]] else { return }
+            
+            for candidate in candidates {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("CallCandidate"),
+                    object: nil,
+                    userInfo: [
+                        "callId": callId,
+                        "candidate": candidate
+                    ]
+                )
+            }
+        }
+    }
+    
+    // MARK: - Call Notification Setup
+    private func setupCallNotifications() {
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("IncomingCall"),
+            object: nil,
+            queue: .main
+        ) { notification in
+            print("Incoming call notification received")
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("CallAnswer"),
+            object: nil,
+            queue: .main
+        ) { notification in
+            print("Call answer notification received")
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("CallHangup"),
+            object: nil,
+            queue: .main
+        ) { notification in
+            print("Call hangup notification received")
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("CallCandidate"),
+            object: nil,
+            queue: .main
+        ) { notification in
+            print("Call candidate notification received")
+        }
+    }
+    
+    // MARK: - Display Name Management
+    func getDisplayName(for room: MXRoom) -> String {
+        if room.isDirect {
+            if let directUserId = room.directUserId {
+                return extractUsername(from: directUserId)
+            }
+            return "Личный чат"
+        }
+        
+        if let summary = room.summary, let displayName = summary.displayName, !displayName.isEmpty {
+            return displayName
+        }
+        
+        if let otherUserId = extractUserIdFromRoomId(room.roomId) {
+            return extractUsername(from: otherUserId)
+        }
+        
+        return room.roomId
+    }
+    
+    private func extractUserIdFromRoomId(_ roomId: String) -> String? {
+        let pattern = "@[^:]+:[^\\s]+"
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            let range = NSRange(roomId.startIndex..<roomId.endIndex, in: roomId)
+            if let match = regex.firstMatch(in: roomId, options: [], range: range) {
+                if let matchedRange = Range(match.range, in: roomId) {
+                    return String(roomId[matchedRange])
+                }
+            }
+        }
+        return nil
+    }
+    
+    private func extractUsername(from userId: String) -> String {
+        if let range = userId.range(of: "@(.*):", options: .regularExpression) {
+            let username = String(userId[range].dropFirst().dropLast())
+            return username.capitalized
+        }
+        return userId
+    }
+    
+    func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
+        mxSession?.matrixRestClient.displayName(forUser: userId) { (response: MXResponse<String>) in
+            switch response {
+            case .success(let displayName):
+                completion(displayName)
+            case .failure:
+                completion(nil)
+            }
+        }
+    }
+    
+    // MARK: - Logout
+    func logout() {
+        stopBackgroundRefresh()
+        
+        Thread.runOnMainThread {
+            for (roomId, listener) in self.roomListeners {
+                if let room = self.mxSession?.room(withRoomId: roomId) {
+                    room.removeListener(listener)
+                }
+            }
+            self.roomListeners.removeAll()
+            
+            self.mxSession?.close()
+            self.mxSession = nil
+            self.mxRestClient = nil
+            self.rooms = []
+            self.messages = []
+            self.isLoggedIn = false
+            self.currentUserId = nil
+            self.error = nil
+            self.isLoadingHistory.removeAll()
+            self.processedEventIds.removeAll()
+            self.hasSetupRoomListeners = false
+            self.reactionEvents.removeAll()
+            self.roomStatuses.removeAll()
+            self.mediaCache.removeAll()
+            self.lastRoomUpdate = Date()
+            
+            // Remove notification observers
+            NotificationCenter.default.removeObserver(self)
+        }
+    }
+    
+    private func startBackgroundRefresh() {
+        backgroundRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.backgroundRefreshRooms()
+        }
+    }
+    
+    private func stopBackgroundRefresh() {
+        backgroundRefreshTimer?.invalidate()
+        backgroundRefreshTimer = nil
+    }
+}
+
+// MARK: - Extensions
+extension MXRoom: @retroactive Identifiable {
+    public var id: String { roomId }
+}
+
+extension String: @retroactive Identifiable {
+    public var id: String { self }
+}
+
+extension MXEvent {
+    func isRedactedEvent() -> Bool {
+        return self.eventType == .roomRedaction || self.isState()
+    }
+}
+
 struct ContentView: View {
     @StateObject private var matrixService = MatrixService()
     @StateObject private var cryptoService = CryptoService.shared
+    @StateObject private var callManager = CallManager()
+    @StateObject private var callCoordinator = CallCoordinator.shared
     @State private var username = ""
     @State private var password = ""
     @State private var isLoggedIn = false
     @State private var selectedTab = 0
     @State private var isLoadingSavedCredentials = false
+    @State private var cancellables = Set<AnyCancellable>()
+    
+    init() {
+        // Инициализируем координатор звонков с зависимостями
+        // Настройка менеджера звонков и координатора
+        let callManager = CallManager()
+        _callManager = StateObject(wrappedValue: callManager)
+        
+        // Настройка координатора звонков
+        CallCoordinator.shared.setup(matrixService: matrixService, callManager: callManager)
+    }
     
     var body: some View {
         NavigationView {
@@ -700,14 +3514,59 @@ struct ContentView: View {
         .navigationViewStyle(StackNavigationViewStyle())
         .preferredColorScheme(.dark)
         .onChange(of: matrixService.isLoggedIn) { newValue in
-            isLoggedIn = newValue
-            if !newValue {
-                UserCredentialsManager.shared.clearCredentials()
+            Thread.runOnMainThread {
+                isLoggedIn = newValue
+                if !newValue {
+                    UserCredentialsManager.shared.clearCredentials()
+                    callManager.endCall()
+                }
             }
         }
         .onAppear {
             checkSavedCredentials()
+            
+            // Настройка менеджера звонков
+            callManager.setup(matrixService: matrixService)
+            
+            // Настройка обработки звонков
+            setupCallHandling()
         }
+        .sheet(isPresented: $callCoordinator.showingCallView) {
+            if callManager.isInCall {
+                CallView(callManager: callManager)
+                    .onDisappear {
+                        if callManager.isInCall {
+                            callManager.endCall()
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $callCoordinator.showingIncomingCall) {
+            if callManager.incomingCall != nil {
+                IncomingCallView(callManager: callManager)
+            }
+        }
+    }
+    
+    private func setupCallHandling() {
+        // Слушаем изменения состояния звонков
+        callManager.$isInCall
+            .receive(on: RunLoop.main)
+            .sink { isInCall in
+                if isInCall {
+                    self.callCoordinator.showingCallView = true
+                }
+            }
+            .store(in: &cancellables)
+        
+        callManager.$incomingCall
+            .receive(on: RunLoop.main)
+            .sink { incomingCall in
+                if incomingCall != nil {
+                    self.callCoordinator.showingIncomingCall = true
+                }
+            }
+            .store(in: &cancellables)
     }
     
     var loadingView: some View {
@@ -739,7 +3598,7 @@ struct ContentView: View {
             K34Colors.background.ignoresSafeArea()
             
             TabView(selection: $selectedTab) {
-                ChatListView(matrixService: matrixService, cryptoService: cryptoService)
+                ChatListView(matrixService: matrixService, cryptoService: cryptoService, callManager: callManager)
                     .tabItem {
                         Image(systemName: "message.fill")
                             .foregroundColor(K34Colors.primaryRed)
@@ -876,6 +3735,7 @@ struct ContentView: View {
 struct ChatListView: View {
     @ObservedObject var matrixService: MatrixService
     @ObservedObject var cryptoService: CryptoService
+    @ObservedObject var callManager: CallManager
     @State private var selectedRoomId: String?
     @State private var showingLeaveAlert = false
     @State private var roomToLeave: MXRoom?
@@ -1013,7 +3873,7 @@ struct ChatListView: View {
     
     private func chatRow(for room: MXRoom) -> some View {
         ZStack {
-            NavigationLink(destination: ChatRoomView(matrixService: matrixService, cryptoService: cryptoService, room: room), tag: room.roomId, selection: $selectedRoomId) {
+            NavigationLink(destination: ChatRoomView(matrixService: matrixService, cryptoService: cryptoService, callManager: callManager, room: room), tag: room.roomId, selection: $selectedRoomId) {
                 EmptyView()
             }
             .opacity(0)
@@ -1397,6 +4257,7 @@ struct NewChatView: View {
 struct ChatRoomView: View {
     @ObservedObject var matrixService: MatrixService
     @ObservedObject var cryptoService: CryptoService
+    @ObservedObject var callManager: CallManager
     let room: MXRoom
     @State private var messageText = ""
     @State private var showReactionPickerForMessage: String? = nil
@@ -1406,6 +4267,7 @@ struct ChatRoomView: View {
     @State private var showingVoiceRecorder = false
     @StateObject private var voiceRecorder = VoiceMessageRecorder()
     @Environment(\.presentationMode) var presentationMode
+    @State private var showingCallTypePicker = false
     
     var roomMessages: [Message] {
         matrixService.messages
@@ -1437,6 +4299,13 @@ struct ChatRoomView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     if !isInvited {
+                        // Call buttons
+                        Button {
+                            showingCallTypePicker = true
+                        } label: {
+                            Label("Позвонить", systemImage: "phone.fill")
+                        }
+                        
                         Button(role: .destructive) {
                             showingLeaveAlert = true
                         } label: {
@@ -1462,6 +4331,20 @@ struct ChatRoomView: View {
                         .foregroundColor(K34Colors.primaryRed)
                 }
             }
+        }
+        .actionSheet(isPresented: $showingCallTypePicker) {
+            ActionSheet(
+                title: Text("Тип звонка"),
+                buttons: [
+                    .default(Text("Аудиозвонок")) {
+                        startCall(isVideo: false)
+                    },
+                    .default(Text("Видеозвонок")) {
+                        startCall(isVideo: true)
+                    },
+                    .cancel()
+                ]
+            )
         }
         .onAppear {
             matrixService.joinRoom(roomId: room.roomId)
@@ -1733,6 +4616,11 @@ struct ChatRoomView: View {
             print("File selection error: \(error)")
         }
     }
+    
+    private func startCall(isVideo: Bool) {
+        guard let otherUserId = roomStatus?.otherUserId else { return }
+        callManager.makeCall(to: otherUserId, in: room.roomId, isVideo: isVideo)
+    }
 }
 
 // MARK: - Voice Message Recorder View
@@ -1942,6 +4830,8 @@ struct MessageBubble: View {
                         ImageMessageView(message: message)
                     } else if message.messageType == .keyExchange {
                         KeyExchangeMessageView()
+                    } else if message.messageType == .call {
+                        CallMessageView(message: message)
                     }
                     
                     if !message.reactions.isEmpty {
@@ -1998,6 +4888,20 @@ struct MessageBubble: View {
     }
     
     private func getMessageText() -> String {
+        if message.isCallEvent {
+            if let callType = message.callType, let duration = message.callDuration {
+                let typeText = callType == "video" ? "Видеозвонок" : "Аудиозвонок"
+                if duration > 0 {
+                    let minutes = Int(duration) / 60
+                    let seconds = Int(duration) % 60
+                    return "\(typeText) • \(String(format: "%02d:%02d", minutes, seconds))"
+                } else {
+                    return "Пропущенный \(typeText.lowercased())"
+                }
+            }
+            return "Звонок"
+        }
+        
         if message.isEncrypted {
             switch message.encryptionStatus {
             case .decrypted:
@@ -2064,6 +4968,45 @@ struct MessageBubble: View {
         } else {
             matrixService.addReaction("👍", to: message.id, in: room.roomId)
         }
+    }
+}
+
+// MARK: - Call Message View
+struct CallMessageView: View {
+    let message: Message
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: message.callType == "video" ? "video.fill" : "phone.fill")
+                .font(.system(size: 14))
+                .foregroundColor(message.callDuration ?? 0 > 0 ? K34Colors.encryptedGreen : K34Colors.lightRed)
+            
+            Text(getCallMessageText())
+                .font(.subheadline)
+                .foregroundColor(K34Colors.textSecondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background((message.callDuration ?? 0 > 0 ? K34Colors.encryptedGreen : K34Colors.lightRed).opacity(0.1))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke((message.callDuration ?? 0 > 0 ? K34Colors.encryptedGreen : K34Colors.lightRed), lineWidth: 1)
+        )
+    }
+    
+    private func getCallMessageText() -> String {
+        if let callType = message.callType, let duration = message.callDuration {
+            let typeText = callType == "video" ? "Видеозвонок" : "Аудиозвонок"
+            if duration > 0 {
+                let minutes = Int(duration) / 60
+                let seconds = Int(duration) % 60
+                return "\(typeText) • \(String(format: "%02d:%02d", minutes, seconds))"
+            } else {
+                return "Пропущенный \(typeText.lowercased())"
+            }
+        }
+        return "Звонок"
     }
 }
 
@@ -2250,14 +5193,16 @@ struct VoiceMessageView: View {
     private func loadAndPlayAudio() {
         isLoading = true
         matrixService.downloadMedia(for: message, cryptoService: cryptoService) { data in
-            isLoading = false
-            if let data = data {
-                audioData = data
-                if let player = try? AVAudioPlayer(data: data) {
-                    self.actualDuration = player.duration
-                    print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+            Thread.runOnMainThread {
+                isLoading = false
+                if let data = data {
+                    audioData = data
+                    if let player = try? AVAudioPlayer(data: data) {
+                        self.actualDuration = player.duration
+                        print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+                    }
+                    voicePlayer.playAudio(from: data, messageId: message.id)
                 }
-                voicePlayer.playAudio(from: data, messageId: message.id)
             }
         }
     }
@@ -2265,12 +5210,14 @@ struct VoiceMessageView: View {
     private func loadAudioData() {
         isLoading = true
         matrixService.downloadMedia(for: message, cryptoService: cryptoService) { data in
-            isLoading = false
-            if let data = data {
-                audioData = data
-                if let player = try? AVAudioPlayer(data: data) {
-                    self.actualDuration = player.duration
-                    print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+            Thread.runOnMainThread {
+                isLoading = false
+                if let data = data {
+                    audioData = data
+                    if let player = try? AVAudioPlayer(data: data) {
+                        self.actualDuration = player.duration
+                        print("DEBUG: Actual audio duration: \(self.actualDuration) seconds")
+                    }
                 }
             }
         }
@@ -2632,1098 +5579,5 @@ struct ProfileView: View {
                 .navigationBarTitleDisplayMode(.large)
             }
         }
-    }
-}
-
-// MARK: - Matrix Service with Encryption
-class MatrixService: ObservableObject {
-    @Published var messages: [Message] = []
-    @Published var rooms: [MXRoom] = []
-    @Published var isLoading = false
-    @Published var isLoadingRooms = false
-    @Published var error: String?
-    @Published var isLoggedIn = false
-    @Published var currentUserId: String?
-    @Published var isLoadingHistory: [String: Bool] = [:]
-    @Published var roomStatuses: [String: RoomStatus] = [:]
-    @Published var lastRoomUpdate = Date()
-    
-    private var mxRestClient: MXRestClient?
-    private var mxSession: MXSession?
-    private var roomListeners: [String: Any] = [:]
-    private var userDisplayNames: [String: String] = [:]
-    private var processedEventIds: Set<String> = []
-    private var hasSetupRoomListeners = false
-    private var reactionEvents: [String: [MXEvent]] = [:]
-    private var backgroundRefreshTimer: Timer?
-    private var mediaCache: [String: Data] = [:]
-    
-    private let credentialsManager = UserCredentialsManager.shared
-
-    // MARK: - Login and Session Setup
-    func login(username: String, password: String) {
-        isLoading = true
-        error = nil
-        let newUsername = "\(username):k34.online"
-        let homeserverURL = URL(string: "https://k34.online")!
-        mxRestClient = MXRestClient(homeServer: homeserverURL, unrecognizedCertificateHandler: nil)
-        
-        mxRestClient?.login(username: newUsername, password: password) { [weak self] response in
-            guard let self = self else { return }
-            
-            DispatchQueue.main.async {
-                self.isLoading = false
-                
-                switch response {
-                case .success(let credentials):
-                    self.setupSession(credentials: credentials)
-                    self.isLoggedIn = true
-                    self.currentUserId = credentials.userId
-                    
-                    // Save credentials for future use
-                    self.credentialsManager.saveCredentials(username: username, password: password)
-                    
-                case .failure(let error):
-                    self.error = error.localizedDescription
-                    self.isLoggedIn = false
-                    
-                    // Clear invalid credentials
-                    if error.localizedDescription.contains("неверные учетные данные") ||
-                       error.localizedDescription.contains("invalid credentials") ||
-                       error.localizedDescription.contains("401") {
-                        self.credentialsManager.clearCredentials()
-                    }
-                }
-            }
-        }
-    }
-    
-    private func setupSession(credentials: MXCredentials) {
-        mxRestClient = MXRestClient(credentials: credentials, unrecognizedCertificateHandler: nil)
-        mxSession = MXSession(matrixRestClient: mxRestClient!)
-        
-        mxSession?.start { [weak self] response in
-            guard let self = self else { return }
-            
-            if case .success = response {
-                self.loadRooms()
-                self.setupAllRoomListeners()
-                self.startBackgroundRefresh()
-            } else if case .failure(let error) = response {
-                self.error = error.localizedDescription
-                self.isLoggedIn = false
-            }
-        }
-    }
-    
-    func autoLoginIfPossible() {
-        if credentialsManager.hasSavedCredentials() {
-            let credentials = credentialsManager.getCredentials()
-            if let username = credentials.username, let password = credentials.password {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.login(username: username, password: password)
-                }
-            }
-        }
-    }
-    
-    func loadRooms() {
-        guard let session = mxSession else { return }
-        
-        isLoadingRooms = true
-        rooms = session.rooms ?? []
-        updateRoomStatuses()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.isLoadingRooms = false
-            self.lastRoomUpdate = Date()
-        }
-    }
-    
-    func backgroundRefreshRooms() {
-        guard let session = mxSession, !isLoadingRooms else { return }
-        
-        let previousRooms = rooms
-        rooms = session.rooms ?? []
-        updateRoomStatuses()
-        
-        if rooms != previousRooms {
-            lastRoomUpdate = Date()
-        }
-    }
-    
-    private func startBackgroundRefresh() {
-        backgroundRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            self?.backgroundRefreshRooms()
-        }
-    }
-    
-    private func stopBackgroundRefresh() {
-        backgroundRefreshTimer?.invalidate()
-        backgroundRefreshTimer = nil
-    }
-    
-    // MARK: - Room Status Management
-    private func updateRoomStatuses() {
-        guard let session = mxSession else { return }
-        
-        var newStatuses: [String: RoomStatus] = [:]
-        
-        for room in session.rooms ?? [] {
-            let roomId = room.roomId
-            let membership = room.summary?.membership ?? .unknown
-            
-            let isInvited = membership == .invite
-            let isInvitationOutgoing = self.isInvitationOutgoing(room: room)
-            let otherUserId = self.getOtherUserId(for: room)
-            let isEncrypted = room.summary?.isEncrypted ?? false
-            
-            newStatuses[roomId!] = RoomStatus(
-                roomId: roomId!,
-                isInvited: isInvited,
-                isInvitationOutgoing: isInvitationOutgoing,
-                otherUserId: otherUserId,
-                isEncrypted: isEncrypted
-            )
-        }
-        
-        DispatchQueue.main.async {
-            self.roomStatuses = newStatuses
-        }
-    }
-    
-    private func isInvitationOutgoing(room: MXRoom) -> Bool {
-        guard let summary = room.summary else { return false }
-        
-        if summary.membership == .join {
-            let memberCount = summary.membersCount.members
-            let hasLastMessage = summary.lastMessage != nil
-            
-            return memberCount <= 2 && !hasLastMessage
-        }
-        
-        return false
-    }
-    
-    private func getOtherUserId(for room: MXRoom) -> String? {
-        if room.isDirect {
-            return room.directUserId
-        }
-        
-        return room.summary?.displayName
-    }
-    
-    func getRoomStatus(for room: MXRoom) -> RoomStatus? {
-        return roomStatuses[room.roomId]
-    }
-    
-    // MARK: - Room Leaving
-    func leaveRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            completion?(false)
-            return
-        }
-        
-        room.leave { [weak self] response in
-            DispatchQueue.main.async {
-                switch response {
-                case .success:
-                    self?.rooms.removeAll { $0.roomId == roomId }
-                    self?.messages.removeAll { $0.roomId == roomId }
-                    self?.roomStatuses.removeValue(forKey: roomId)
-                    if let listener = self?.roomListeners[roomId] {
-                        room.removeListener(listener)
-                        self?.roomListeners.removeValue(forKey: roomId)
-                    }
-                    self?.error = nil
-                    self?.lastRoomUpdate = Date()
-                    completion?(true)
-                case .failure(let error):
-                    self?.error = "Ошибка при выходе из чата: \(error.localizedDescription)"
-                    completion?(false)
-                }
-            }
-        }
-    }
-    
-    // MARK: - Invitation Handling
-    func acceptInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            completion(false)
-            return
-        }
-        
-        room.join { [weak self] response in
-            DispatchQueue.main.async {
-                switch response {
-                case .success:
-                    self?.setupRoomListener(for: room)
-                    self?.loadRoomHistoryAfterAcceptingInvitation(for: room)
-                    self?.loadRooms()
-                    self?.updateRoomStatuses()
-                    completion(true)
-                case .failure(let error):
-                    self?.error = "Ошибка принятия приглашения: \(error.localizedDescription)"
-                    completion(false)
-                }
-            }
-        }
-    }
-    
-    private func loadRoomHistoryAfterAcceptingInvitation(for room: MXRoom) {
-        let roomId = room.roomId!
-        
-        isLoadingHistory[roomId] = true
-        
-        room.liveTimeline { [weak self] timeline in
-            guard let self = self, let timeline = timeline else {
-                DispatchQueue.main.async {
-                    self?.isLoadingHistory[roomId] = false
-                }
-                return
-            }
-            
-            timeline.resetPagination()
-            self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
-        }
-    }
-    
-    private func paginateRoomHistoryAfterAcceptingInvitation(timeline: MXEventTimeline, room: MXRoom) {
-        let roomId = room.roomId!
-        
-        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
-            guard let self = self else { return }
-            
-            switch response {
-            case .success:
-                if timeline.canPaginate(.backwards) {
-                    self.paginateRoomHistoryAfterAcceptingInvitation(timeline: timeline, room: room)
-                } else {
-                    self.startListeningToRoomEvents(room)
-                    DispatchQueue.main.async {
-                        self.isLoadingHistory[roomId] = false
-                        self.lastRoomUpdate = Date()
-                    }
-                }
-            case .failure(let error):
-                print("Ошибка загрузки истории после принятия приглашения: \(error)")
-                self.startListeningToRoomEvents(room)
-                DispatchQueue.main.async {
-                    self.isLoadingHistory[roomId] = false
-                }
-            }
-        }
-    }
-    
-    private func startListeningToRoomEvents(_ room: MXRoom) {
-        let roomId = room.roomId!
-        
-        room.liveTimeline { [weak self] timeline in
-            guard let self = self, let timeline = timeline else { return }
-            
-            timeline.listenToEvents { [weak self] event, direction, roomState in
-                guard let self = self else { return }
-                
-                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
-            }
-            
-            timeline.resetPagination()
-            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
-                // After loading existing events
-            }
-        }
-    }
-    
-    func rejectInvitation(roomId: String, completion: @escaping (Bool) -> Void) {
-        leaveRoom(roomId: roomId, completion: completion)
-    }
-    
-    private func setupAllRoomListeners() {
-        guard let session = mxSession, !hasSetupRoomListeners else { return }
-        
-        for room in session.rooms ?? [] {
-            setupRoomListener(for: room)
-        }
-        hasSetupRoomListeners = true
-        updateRoomStatuses()
-    }
-    
-    private func setupRoomListener(for room: MXRoom) {
-        let roomId = room.roomId!
-        
-        if let existingListener = roomListeners[roomId] {
-            room.removeListener(existingListener)
-        }
-        
-        let listener = room.liveTimeline { [weak self] timeline in
-            guard let self = self, let timeline = timeline else { return }
-            
-            timeline.listenToEvents { [weak self] event, direction, roomState in
-                guard let self = self else { return }
-                
-                self.handleTimelineEvent(event, direction: direction, roomId: roomId)
-            }
-            
-            timeline.resetPagination()
-            timeline.paginate(100, direction: .backwards, onlyFromStore: true) { response in
-                // Events will be available through listenToEvents
-            }
-        }
-        
-        roomListeners[roomId] = listener
-    }
-    
-    // MARK: - Room Management
-    func joinRoom(roomId: String) {
-        guard let room = mxSession?.room(withRoomId: roomId) else { return }
-        
-        setupRoomListener(for: room)
-        
-        isLoadingHistory[roomId] = true
-        loadRoomHistory(for: room)
-    }
-    
-    private func loadRoomHistory(for room: MXRoom) {
-        let roomId = room.roomId!
-        
-        room.liveTimeline { [weak self] timeline in
-            guard let self = self, let timeline = timeline else {
-                DispatchQueue.main.async {
-                    self?.isLoadingHistory[roomId] = false
-                }
-                return
-            }
-            
-            timeline.resetPagination()
-            self.paginateRoomHistory(timeline: timeline, room: room)
-        }
-    }
-    
-    private func paginateRoomHistory(timeline: MXEventTimeline, room: MXRoom) {
-        let roomId = room.roomId!
-        
-        timeline.paginate(100, direction: .backwards, onlyFromStore: false) { [weak self] response in
-            guard let self = self else { return }
-            
-            switch response {
-            case .success:
-                if timeline.canPaginate(.backwards) {
-                    self.paginateRoomHistory(timeline: timeline, room: room)
-                } else {
-                    DispatchQueue.main.async {
-                        self.isLoadingHistory[roomId] = false
-                        self.lastRoomUpdate = Date()
-                    }
-                }
-            case .failure(let error):
-                print("Ошибка загрузки истории: \(error)")
-                DispatchQueue.main.async {
-                    self.isLoadingHistory[roomId] = false
-                }
-            }
-        }
-    }
-    
-    private func handleTimelineEvent(_ event: MXEvent, direction: MXTimelineDirection, roomId: String) {
-        if event.eventType == .roomMember {
-            DispatchQueue.main.async {
-                self.updateRoomStatuses()
-                self.lastRoomUpdate = Date()
-            }
-        }
-        
-        if event.eventType == .roomMessage {
-            if let message = createMessage(from: event, roomId: roomId) {
-                DispatchQueue.main.async {
-                    if !self.processedEventIds.contains(message.id) {
-                        self.processedEventIds.insert(message.id)
-                        self.messages.append(message)
-                        self.messages.sort { $0.timestamp < $1.timestamp }
-                        self.lastRoomUpdate = Date()
-                        self.objectWillChange.send()
-                    }
-                }
-            }
-        } else if event.eventType == .reaction {
-            handleReactionEvent(event, roomId: roomId)
-        } else if event.eventType == .roomRedaction {
-            handleRedactionEvent(event, roomId: roomId)
-        }
-    }
-    
-    private func handleRedactionEvent(_ event: MXEvent, roomId: String) {
-        guard let redactedEventId = event.redacts else { return }
-        
-        DispatchQueue.main.async {
-            for (messageId, events) in self.reactionEvents {
-                if let index = events.firstIndex(where: { $0.eventId == redactedEventId }) {
-                    self.reactionEvents[messageId]?.remove(at: index)
-                    
-                    if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
-                        var updatedMessage = self.messages[messageIndex]
-                        updatedMessage.reactions = self.calculateReactions(for: messageId)
-                        self.messages[messageIndex] = updatedMessage
-                    }
-                    break
-                }
-            }
-            
-            self.lastRoomUpdate = Date()
-            self.objectWillChange.send()
-        }
-    }
-    
-    private func handleReactionEvent(_ event: MXEvent, roomId: String) {
-        if event.isRedactedEvent() {
-            return
-        }
-        
-        guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
-              let relType = relatesTo["rel_type"] as? String,
-              relType == "m.annotation",
-              let eventId = relatesTo["event_id"] as? String,
-              let key = relatesTo["key"] as? String else {
-            return
-        }
-        
-        DispatchQueue.main.async {
-            if self.reactionEvents[eventId] == nil {
-                self.reactionEvents[eventId] = []
-            }
-            
-            if let existingIndex = self.reactionEvents[eventId]?.firstIndex(where: {
-                $0.eventId == event.eventId ||
-                ($0.sender == event.sender &&
-                 ($0.content["m.relates_to"] as? [String: Any])?["key"] as? String == key)
-            }) {
-                self.reactionEvents[eventId]?[existingIndex] = event
-            } else {
-                self.reactionEvents[eventId]?.append(event)
-            }
-            
-            if let messageIndex = self.messages.firstIndex(where: { $0.id == eventId }) {
-                var updatedMessage = self.messages[messageIndex]
-                updatedMessage.reactions = self.calculateReactions(for: eventId)
-                self.messages[messageIndex] = updatedMessage
-                self.lastRoomUpdate = Date()
-                self.objectWillChange.send()
-            }
-        }
-    }
-    
-    private func calculateReactions(for messageId: String) -> [MessageReaction] {
-        guard let events = reactionEvents[messageId] else { return [] }
-        
-        var reactionCounts: [String: (count: Int, users: [String])] = [:]
-        
-        for event in events {
-            if event.isRedactedEvent() {
-                continue
-            }
-            
-            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
-                  let key = relatesTo["key"] as? String else { continue }
-            
-            if reactionCounts[key] == nil {
-                reactionCounts[key] = (0, [])
-            }
-            
-            let isRedacted = event.isState()
-            if !isRedacted, let sender = event.sender {
-                reactionCounts[key]?.count += 1
-                reactionCounts[key]?.users.append(sender)
-            }
-        }
-        
-        return reactionCounts.map { emoji, data in
-            MessageReaction(
-                emoji: emoji,
-                count: data.count,
-                users: data.users,
-                didReact: data.users.contains(currentUserId ?? "")
-            )
-        }.sorted { $0.count > $1.count }
-    }
-    
-    private func createMessage(from event: MXEvent, roomId: String) -> Message? {
-        guard event.eventType == .roomMessage else {
-            return nil
-        }
-        
-        var messageText = ""
-        var messageType: MessageType = .text
-        var mediaURL: String? = nil
-        var fileName: String? = nil
-        var fileSize: Int? = nil
-        var duration: TimeInterval? = nil
-        var isEncrypted = false
-        var encryptionStatus: EncryptionStatus = .pending
-        
-        // Check if this is a key exchange message
-        if let msgtype = event.content["msgtype"] as? String, msgtype == "m.key_exchange" {
-            messageType = .keyExchange
-            messageText = "Key exchange message"
-            isEncrypted = false
-        } else if let encryptedContent = event.content["encrypted"] as? [String: Any] {
-            // This is an encrypted message
-            isEncrypted = true
-            messageText = "Зашифрованное сообщение"
-            encryptionStatus = .encrypted
-            
-            // In a real implementation, you would decrypt here using CryptoService
-            // For now, we'll mark it as encrypted
-        } else if let text = event.content["body"] as? String {
-            messageText = text
-            
-            let msgtype = event.content["msgtype"] as? String
-            
-            if msgtype == "m.image" {
-                messageType = .image
-                if let url = event.content["url"] as? String {
-                    mediaURL = url
-                }
-            } else if msgtype == "m.file" {
-                messageType = .file
-                if let url = event.content["url"] as? String {
-                    mediaURL = url
-                }
-                if let info = event.content["info"] as? [String: Any] {
-                    fileName = event.content["filename"] as? String ?? "Файл"
-                    fileSize = info["size"] as? Int
-                    
-                    if let mimetype = info["mimetype"] as? String, mimetype == "audio/mp4" ||
-                       fileName?.hasSuffix(".m4a") == true || fileName?.hasSuffix(".mp4") == true {
-                        messageType = .voice
-                        if let durationMs = info["duration"] as? Int {
-                            duration = TimeInterval(durationMs) / 1000.0
-                        } else if let durationSeconds = info["duration"] as? TimeInterval {
-                            duration = durationSeconds
-                        }
-                        print("DEBUG: Voice message duration from event: \(duration ?? 0) seconds")
-                    }
-                }
-            } else if msgtype == "m.audio" {
-                messageType = .voice
-                if let url = event.content["url"] as? String {
-                    mediaURL = url
-                }
-                if let info = event.content["info"] as? [String: Any] {
-                    if let durationMs = info["duration"] as? Int {
-                        duration = TimeInterval(durationMs) / 1000.0
-                    } else if let durationSeconds = info["duration"] as? TimeInterval {
-                        duration = durationSeconds
-                    }
-                    fileName = event.content["filename"] as? String ?? "Голосовое сообщение"
-                    fileSize = info["size"] as? Int
-                    print("DEBUG: Audio message duration from event: \(duration ?? 0) seconds")
-                }
-            }
-        } else {
-            return nil
-        }
-        
-        let timestamp: Date
-        if event.originServerTs != 0 && event.originServerTs > 1000000000000 {
-            timestamp = Date(timeIntervalSince1970: TimeInterval(event.originServerTs / 1000))
-        } else {
-            timestamp = Date()
-        }
-        
-        let messageId = event.eventId ?? UUID().uuidString
-        let reactions = calculateReactions(for: messageId)
-        
-        return Message(
-            id: messageId,
-            text: messageText,
-            sender: event.sender ?? "Unknown",
-            timestamp: timestamp,
-            roomId: roomId,
-            isOutgoing: event.sender == self.currentUserId,
-            reactions: reactions,
-            messageType: messageType,
-            mediaURL: mediaURL,
-            fileName: fileName,
-            fileSize: fileSize,
-            duration: duration,
-            isEncrypted: isEncrypted,
-            encryptionStatus: encryptionStatus
-        )
-    }
-    
-    // MARK: - File and Voice Message Sending with Encryption
-    func sendFile(_ fileURL: URL, in roomId: String, cryptoService: CryptoService) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            error = "Комната не найдена"
-            return
-        }
-        
-        do {
-            let fileData = try Data(contentsOf: fileURL)
-            let fileName = fileURL.lastPathComponent
-            let mimeType = "application/octet-stream"
-            
-            // Encrypt the file data if the room is encrypted
-            let finalData: Data
-            let roomStatus = getRoomStatus(for: room)
-            if roomStatus?.isEncrypted == true, let encryptedData = cryptoService.encryptFile(fileData, roomId: roomId) {
-                finalData = encryptedData
-            } else {
-                finalData = fileData
-            }
-            
-            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
-            try finalData.write(to: tempURL)
-            
-            var localEcho: MXEvent?
-            room.sendFile(localURL: tempURL, mimeType: mimeType, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-                DispatchQueue.main.async {
-                    try? FileManager.default.removeItem(at: tempURL)
-                    
-                    switch response {
-                    case .success:
-                        self?.lastRoomUpdate = Date()
-                    case .failure(let error):
-                        self?.error = "Ошибка отправки файла: \(error.localizedDescription)"
-                    }
-                }
-            }
-        } catch {
-            self.error = "Ошибка чтения файла: \(error.localizedDescription)"
-        }
-    }
-
-    func sendVoiceMessage(_ audioData: Data, in roomId: String, cryptoService: CryptoService) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            error = "Комната не найдена"
-            return
-        }
-        
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("voice-\(Date().timeIntervalSince1970).m4a")
-        
-        do {
-            // Encrypt the audio data if the room is encrypted
-            let finalData: Data
-            let roomStatus = getRoomStatus(for: room)
-            if roomStatus?.isEncrypted == true, let encryptedData = cryptoService.encryptFile(audioData, roomId: roomId) {
-                finalData = encryptedData
-            } else {
-                finalData = audioData
-            }
-            
-            try finalData.write(to: tempURL)
-            
-            var audioDuration: TimeInterval = 0
-            if let player = try? AVAudioPlayer(data: audioData) {
-                audioDuration = player.duration
-                print("DEBUG: Sending voice message with duration: \(audioDuration) seconds")
-            }
-            
-            var localEcho: MXEvent?
-            room.sendFile(localURL: tempURL,
-                         mimeType: "audio/mp4",
-                         localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-                DispatchQueue.main.async {
-                    try? FileManager.default.removeItem(at: tempURL)
-                    
-                    switch response {
-                    case .success:
-                        self?.lastRoomUpdate = Date()
-                    case .failure(let error):
-                        self?.error = "Ошибка отправки голосового сообщения: \(error.localizedDescription)"
-                    }
-                }
-            }
-        } catch {
-            self.error = "Ошибка сохранения аудио: \(error.localizedDescription)"
-        }
-    }
-    
-    // MARK: - Media Download with Decryption
-    func downloadMedia(for message: Message, cryptoService: CryptoService, completion: @escaping (Data?) -> Void) {
-        guard let mediaURL = message.mediaURL else {
-            completion(nil)
-            return
-        }
-        
-        if let cachedData = mediaCache[mediaURL] {
-            // Decrypt if the message is encrypted
-            if message.isEncrypted, let decryptedData = cryptoService.decryptFile(cachedData, roomId: message.roomId) {
-                completion(decryptedData)
-            } else {
-                completion(cachedData)
-            }
-            return
-        }
-        
-        mxSession?.mediaManager.downloadMedia(
-            fromMatrixContentURI: mediaURL,
-            withType: nil,
-            inFolder: nil,
-            success: { [weak self] (outputFilePath: String?) in
-                guard let filePath = outputFilePath,
-                      let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
-                    completion(nil)
-                    return
-                }
-                
-                DispatchQueue.main.async {
-                    self?.mediaCache[mediaURL] = data
-                    
-                    // Decrypt if the message is encrypted
-                    if message.isEncrypted, let decryptedData = cryptoService.decryptFile(data, roomId: message.roomId) {
-                        completion(decryptedData)
-                    } else {
-                        completion(data)
-                    }
-                }
-            },
-            failure: { (error: Error?) in
-                DispatchQueue.main.async {
-                    completion(nil)
-                }
-            }
-        )
-    }
-    
-    // MARK: - Last Message Preview
-    struct MessagePreview {
-        let text: String
-        let time: String
-    }
-    
-    func getLastMessagePreview(for room: MXRoom) -> MessagePreview {
-        let roomMessages = messages
-            .filter { $0.roomId == room.roomId }
-            .sorted { $0.timestamp > $1.timestamp }
-        
-        if let lastMessage = roomMessages.first {
-            let timeFormatter = DateFormatter()
-            timeFormatter.timeStyle = .short
-            let timeString = timeFormatter.string(from: lastMessage.timestamp)
-            
-            var previewText = lastMessage.text
-            if lastMessage.messageType == .file {
-                previewText = "📎 Файл"
-            } else if lastMessage.messageType == .voice {
-                previewText = "🎤 Голосовое сообщение"
-            } else if lastMessage.messageType == .image {
-                previewText = "📷 Изображение"
-            } else if lastMessage.messageType == .keyExchange {
-                previewText = "🔑 Обмен ключами"
-            } else if lastMessage.isEncrypted {
-                previewText = "🔒 Зашифрованное сообщение"
-            }
-            
-            return MessagePreview(
-                text: previewText,
-                time: timeString
-            )
-        }
-        
-        if let lastMessage = room.summary?.lastMessage,
-           let text = lastMessage.text, !text.isEmpty {
-            
-            let timeFormatter = DateFormatter()
-            timeFormatter.timeStyle = .short
-            let timeString: String
-            
-            if lastMessage.originServerTs != 0 {
-                let date = Date(timeIntervalSince1970: TimeInterval(lastMessage.originServerTs / 1000))
-                timeString = timeFormatter.string(from: date)
-            } else {
-                timeString = ""
-            }
-            
-            return MessagePreview(
-                text: text,
-                time: timeString
-            )
-        }
-        
-        return MessagePreview(
-            text: "Пока нет сообщений",
-            time: ""
-        )
-    }
-    
-    // MARK: - Reactions
-    func addReaction(_ emoji: String, to messageId: String, in roomId: String) {
-        guard let room = mxSession?.room(withRoomId: roomId) else { return }
-        
-        let reactionContent: [String: Any] = [
-            "m.relates_to": [
-                "rel_type": "m.annotation",
-                "event_id": messageId,
-                "key": emoji
-            ]
-        ]
-        var localEcho: MXEvent?
-        
-        room.sendEvent(.reaction, content: reactionContent, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-            DispatchQueue.main.async {
-                switch response {
-                case .success:
-                    self?.lastRoomUpdate = Date()
-                case .failure(let error):
-                    self?.error = "Ошибка при добавлении реакции: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-    
-    func removeReaction(_ emoji: String, from messageId: String, in roomId: String) {
-        guard let room = mxSession?.room(withRoomId: roomId),
-              let events = reactionEvents[messageId] else { return }
-        
-        let reactionEventToRemove = events.first { event in
-            guard let relatesTo = event.content["m.relates_to"] as? [String: Any],
-                  let key = relatesTo["key"] as? String,
-                  let relEventId = relatesTo["event_id"] as? String,
-                  key == emoji,
-                  relEventId == messageId,
-                  event.sender == currentUserId else {
-                return false
-            }
-            return true
-        }
-        
-        guard let eventToRemove = reactionEventToRemove else { return }
-        
-        if let messageIndex = self.messages.firstIndex(where: { $0.id == messageId }) {
-            var updatedMessage = self.messages[messageIndex]
-            if let index = self.reactionEvents[messageId]?.firstIndex(where: { $0.eventId == eventToRemove.eventId }) {
-                self.reactionEvents[messageId]?.remove(at: index)
-            }
-            updatedMessage.reactions = self.calculateReactions(for: messageId)
-            self.messages[messageIndex] = updatedMessage
-            self.lastRoomUpdate = Date()
-            self.objectWillChange.send()
-        }
-        
-        room.redactEvent(eventToRemove.eventId, reason: nil) { [weak self] (response: MXResponse<Void>) in
-            DispatchQueue.main.async {
-                switch response {
-                case .success:
-                    if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
-                        var updatedMessage = self?.messages[messageIndex]
-                        updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
-                        self?.messages[messageIndex] = updatedMessage!
-                        self?.lastRoomUpdate = Date()
-                        self?.objectWillChange.send()
-                    }
-                case .failure(let error):
-                    self?.error = "Ошибка при удалении реакции: \(error.localizedDescription)"
-                    if let messageIndex = self?.messages.firstIndex(where: { $0.id == messageId }) {
-                        var updatedMessage = self?.messages[messageIndex]
-                        updatedMessage?.reactions = self?.calculateReactions(for: messageId) ?? []
-                        self?.messages[messageIndex] = updatedMessage!
-                        self?.lastRoomUpdate = Date()
-                        self?.objectWillChange.send()
-                    }
-                }
-            }
-        }
-    }
-    
-    // MARK: - Room Creation with Encryption
-    func createDirectChat(with userId: String, enableEncryption: Bool = true, completion: @escaping (Bool) -> Void) {
-        guard let session = mxSession else {
-            error = "Нет подключения"
-            completion(false)
-            return
-        }
-    
-        let parameters = MXRoomCreationParameters()
-        parameters.inviteArray = [userId]
-        parameters.isDirect = true
-        parameters.visibility = kMXRoomDirectoryVisibilityPrivate
-        
-        // Enable encryption if requested
-        if enableEncryption {
-            parameters.initialStateEvents = [
-                MXRoomCreationParameters.initialStateEventForEncryption(withAlgorithm: kMXCryptoMegolmAlgorithm)
-            ].compactMap { $0 }
-        }
-        
-        session.createRoom(parameters: parameters) { [weak self] (response: MXResponse<MXRoom>) in
-            DispatchQueue.main.async {
-                switch response {
-                case .success(let room):
-                    self?.rooms.append(room)
-                    self?.error = nil
-                    self?.setupRoomListener(for: room)
-                    self?.updateRoomStatuses()
-                    self?.lastRoomUpdate = Date()
-                    
-                    // Send key exchange if encryption is enabled
-                    if enableEncryption {
-                        // This would be handled by the crypto service when the room is joined
-                    }
-                    
-                    completion(true)
-                case .failure(let error):
-                    self?.error = "Ошибка при создании чата: \(error.localizedDescription)"
-                    completion(false)
-                }
-            }
-        }
-    }
-    
-    // MARK: - Message Sending with Encryption
-    func sendMessage(_ text: String, in roomId: String, cryptoService: CryptoService) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            error = "Комната не найдена"
-            return
-        }
-        
-        let roomStatus = getRoomStatus(for: room)
-        let finalText: String
-        
-        // Encrypt the message if the room is encrypted
-        if roomStatus?.isEncrypted == true, let encryptedText = cryptoService.encryptMessage(text, roomId: roomId) {
-            finalText = encryptedText
-        } else {
-            finalText = text
-        }
-        
-        var localEcho: MXEvent?
-        room.sendTextMessage(finalText, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-            DispatchQueue.main.async {
-                if case .failure(let error) = response {
-                    self?.error = "Ошибка отправки: \(error.localizedDescription)"
-                } else {
-                    self?.lastRoomUpdate = Date()
-                }
-            }
-        }
-    }
-    
-    // MARK: - Encrypted Message Sending (for key exchange)
-    func sendEncryptedMessage(_ content: [String: Any], in roomId: String, isKeyExchange: Bool = false) {
-        guard let room = mxSession?.room(withRoomId: roomId) else {
-            error = "Комната не найдена"
-            return
-        }
-        
-        var localEcho: MXEvent?
-        
-        if isKeyExchange {
-            room.sendEvent(.roomMessage, content: content, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-                DispatchQueue.main.async {
-                    if case .failure(let error) = response {
-                        self?.error = "Ошибка отправки ключа: \(error.localizedDescription)"
-                    } else {
-                        self?.lastRoomUpdate = Date()
-                    }
-                }
-            }
-        } else {
-            room.sendMessage(withContent: content, localEcho: &localEcho) { [weak self] (response: MXResponse<String?>) in
-                DispatchQueue.main.async {
-                    if case .failure(let error) = response {
-                        self?.error = "Ошибка отправки: \(error.localizedDescription)"
-                    } else {
-                        self?.lastRoomUpdate = Date()
-                    }
-                }
-            }
-        }
-    }
-    
-    // MARK: - Display Name Management
-    func getDisplayName(for room: MXRoom) -> String {
-        if room.isDirect {
-            if let directUserId = room.directUserId {
-                return extractUsername(from: directUserId)
-            }
-            return "Личный чат"
-        }
-        
-        if let summary = room.summary, let displayName = summary.displayName, !displayName.isEmpty {
-            return displayName
-        }
-        
-        if let otherUserId = extractUserIdFromRoomId(room.roomId) {
-            return extractUsername(from: otherUserId)
-        }
-        
-        return room.roomId
-    }
-    
-    private func extractUserIdFromRoomId(_ roomId: String) -> String? {
-        let pattern = "@[^:]+:[^\\s]+"
-        if let regex = try? NSRegularExpression(pattern: pattern) {
-            let range = NSRange(roomId.startIndex..<roomId.endIndex, in: roomId)
-            if let match = regex.firstMatch(in: roomId, options: [], range: range) {
-                if let matchedRange = Range(match.range, in: roomId) {
-                    return String(roomId[matchedRange])
-                }
-            }
-        }
-        return nil
-    }
-    
-    private func extractUsername(from userId: String) -> String {
-        if let range = userId.range(of: "@(.*):", options: .regularExpression) {
-            let username = String(userId[range].dropFirst().dropLast())
-            return username.capitalized
-        }
-        return userId
-    }
-    
-    func loadUserDisplayName(userId: String, completion: @escaping (String?) -> Void) {
-        mxSession?.matrixRestClient.displayName(forUser: userId) { (response: MXResponse<String>) in
-            switch response {
-            case .success(let displayName):
-                completion(displayName)
-            case .failure:
-                completion(nil)
-            }
-        }
-    }
-    
-    // MARK: - Logout
-    func logout() {
-        stopBackgroundRefresh()
-        
-        for (roomId, listener) in roomListeners {
-            if let room = mxSession?.room(withRoomId: roomId) {
-                room.removeListener(listener)
-            }
-        }
-        roomListeners.removeAll()
-        
-        mxSession?.close()
-        mxSession = nil
-        mxRestClient = nil
-        rooms = []
-        messages = []
-        isLoggedIn = false
-        currentUserId = nil
-        error = nil
-        isLoadingHistory.removeAll()
-        processedEventIds.removeAll()
-        hasSetupRoomListeners = false
-        reactionEvents.removeAll()
-        roomStatuses.removeAll()
-        mediaCache.removeAll()
-        lastRoomUpdate = Date()
-        
-        // Credentials are cleared in ProfileView
-    }
-}
-
-// MARK: - Extensions
-extension MXRoom: Identifiable {
-    public var id: String { roomId }
-}
-
-extension String: Identifiable {
-    public var id: String { self }
-}
-
-extension MXEvent {
-    func isRedactedEvent() -> Bool {
-        return self.eventType == .roomRedaction || self.isState()
     }
 }
